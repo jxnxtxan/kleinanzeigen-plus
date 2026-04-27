@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Kleinanzeigen Enhanced Controls
+// @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
 // @version      1.0.0
 // @description  Floating settings button with default sort automation.
