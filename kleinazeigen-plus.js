@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.0.3
+// @version      1.0.4
 // @description  Floating settings button with default sort automation.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -248,6 +248,9 @@
         #ka-apply-now {
           margin-top: 8px;
           width: 100%;
+          display: flex;
+          justify-content: center;
+          align-items: center;
           border: none;
           border-radius: 8px;
           padding: 8px;
