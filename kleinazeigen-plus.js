@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.0.4
+// @version      1.0.6
 // @description  Floating settings button with default sort automation.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -21,6 +21,28 @@
     preferredSort: "Niedrigster Preis",
   };
   const VALID_SORTS = ["Neueste", "Niedrigster Preis", "Höchster Preis"];
+  const SORT_URL_SLUG = {
+    Neueste: null,
+    "Niedrigster Preis": "preis",
+    "Höchster Preis": "preisabsteigend",
+  };
+  const SORT_ALIASES = {
+    Neueste: ["neueste", "neu zuerst", "neu"],
+    "Niedrigster Preis": [
+      "niedrigster preis",
+      "preis aufsteigend",
+      "preis: aufsteigend",
+      "niedrigster",
+    ],
+    "Höchster Preis": [
+      "höchster preis",
+      "hoechster preis",
+      "preis absteigend",
+      "preis: absteigend",
+      "höchster",
+      "hoechster",
+    ],
+  };
 
   let isApplyingSort = false;
   let applyRetryTimer = null;
@@ -44,6 +66,53 @@
 
   function saveSettings(next) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  }
+
+  function normalizeText(value) {
+    return String(value || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function optionMatchesSort(optionText, sortName) {
+    const text = normalizeText(optionText);
+    if (!text) return false;
+    const aliases = SORT_ALIASES[sortName] || [sortName];
+    return aliases.some((alias) => {
+      const normalizedAlias = normalizeText(alias);
+      return text === normalizedAlias || text.includes(normalizedAlias);
+    });
+  }
+
+  function buildSortedPath(pathname, sortName) {
+    if (!pathname.startsWith("/s-")) return null;
+    const slug = SORT_URL_SLUG[sortName];
+    const hasSortSegment = /\/sortierung:[^/]+\//.test(pathname);
+
+    // "Neueste" is the default; remove explicit sort segment if present.
+    if (!slug) {
+      if (!hasSortSegment) return pathname;
+      return pathname.replace(/\/sortierung:[^/]+\//, "/");
+    }
+
+    if (hasSortSegment) {
+      const nextPath = pathname.replace(/\/sortierung:[^/]+\//, `/sortierung:${slug}/`);
+      return nextPath;
+    }
+
+    // Insert sort segment after /s- to match Kleinanzeigen route style.
+    return pathname.replace(/^\/s-/, `/s-sortierung:${slug}/`);
+  }
+
+  function applySortByUrl(sortName) {
+    const nextPath = buildSortedPath(window.location.pathname, sortName);
+    if (!nextPath || nextPath === window.location.pathname) return false;
+    const nextUrl = `${window.location.origin}${nextPath}${window.location.search}${window.location.hash}`;
+    window.location.assign(nextUrl);
+    return true;
   }
 
   function getSortRoot() {
@@ -76,7 +145,7 @@
     const target = optionCandidates.find((el) => {
       const text = el.textContent?.trim();
       if (!text) return false;
-      if (text !== sortName) return false;
+      if (!optionMatchesSort(text, sortName)) return false;
       const role = el.getAttribute("role");
       return role === "option" || role === "menuitem" || role === "button" || role === "link" || el.tagName === "LI";
     });
@@ -94,7 +163,9 @@
 
     if (sortRoot.tagName === "SELECT") {
       const select = sortRoot;
-      const option = Array.from(select.options).find((opt) => opt.text.trim() === sortName);
+      const option = Array.from(select.options).find((opt) =>
+        optionMatchesSort(opt.text, sortName)
+      );
       if (!option) return false;
       if (select.value !== option.value) {
         select.value = option.value;
@@ -103,9 +174,6 @@
       }
       return true;
     }
-
-    const currentText = sortRoot.textContent?.trim() || "";
-    if (currentText.includes(sortName)) return true;
 
     sortRoot.click();
     return clickOptionByName(sortName);
@@ -116,7 +184,9 @@
     if (!settings.autoSortEnabled || isApplyingSort) return;
     isApplyingSort = true;
 
-    const applyDone = applySortByLabel(settings.preferredSort);
+    // URL-based sort is more stable on Kleinanzeigen search pages.
+    const appliedViaUrl = applySortByUrl(settings.preferredSort);
+    const applyDone = appliedViaUrl || applySortByLabel(settings.preferredSort);
     isApplyingSort = false;
 
     if (!applyDone) {
