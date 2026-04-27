@@ -251,10 +251,11 @@
           border: none;
           border-radius: 8px;
           padding: 8px;
-          background: #2f7df4;
+          background: #1d4b00;
           color: #fff;
           cursor: pointer;
           font-weight: 600;
+          text-align: center;
         }
       </style>
       <button id="ka-enhanced-open-btn" type="button" title="Kleinanzeigen Einstellungen">
