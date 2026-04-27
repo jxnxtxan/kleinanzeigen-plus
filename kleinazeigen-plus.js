@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.0.6
+// @version      1.0.7
 // @description  Floating settings button with default sort automation.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -89,17 +89,31 @@
 
   function buildSortedPath(pathname, sortName) {
     if (!pathname.startsWith("/s-")) return null;
+    if (pathname.startsWith("/s-anzeige/")) return null;
+
     const slug = SORT_URL_SLUG[sortName];
-    const hasSortSegment = /\/sortierung:[^/]+\//.test(pathname);
+    const hasLeadingSortSegment = /^\/s-sortierung:[^/]+\/.+/.test(pathname);
+    const hasInnerSortSegment = /\/sortierung:[^/]+\//.test(pathname);
 
     // "Neueste" is the default; remove explicit sort segment if present.
     if (!slug) {
-      if (!hasSortSegment) return pathname;
-      return pathname.replace(/\/sortierung:[^/]+\//, "/");
+      let nextPath = pathname;
+      if (hasLeadingSortSegment) {
+        nextPath = nextPath.replace(/^\/s-sortierung:[^/]+\//, "/s-");
+      }
+      if (hasInnerSortSegment) {
+        nextPath = nextPath.replace(/\/sortierung:[^/]+\//g, "/");
+      }
+      return nextPath;
     }
 
-    if (hasSortSegment) {
-      const nextPath = pathname.replace(/\/sortierung:[^/]+\//, `/sortierung:${slug}/`);
+    if (hasLeadingSortSegment) {
+      const nextPath = pathname.replace(/^\/s-sortierung:[^/]+/, `/s-sortierung:${slug}`);
+      return nextPath;
+    }
+
+    if (hasInnerSortSegment) {
+      const nextPath = pathname.replace(/\/sortierung:[^/]+\//g, `/sortierung:${slug}/`);
       return nextPath;
     }
 
