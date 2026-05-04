@@ -7,7 +7,6 @@ Userscript fuer `kleinanzeigen.de` mit einer kleinen Tools-Oberflaeche, automati
 - Tools-Button im Header
 - Einstellungs-Panel direkt auf der Seite
 - Automatische Standard-Sortierung
-- Manuelles Ausloesen per `Jetzt anwenden`
 - **Anzeige (`/s-anzeige/…`)**: Notizen (Speichern/Löschen, eigener Speicher `kaPlusNotesV1`), **Als PDF speichern** (direkter Download via eingebetteter [html2pdf.js](https://github.com/eKoopmans/html2pdf.js), `@require` im Script)
 - **Suche**: gelbe Lupen-Schaltfläche auf Kartenbildern, Lightbox mit größtmöglicher Bild-URL
 - Auto-Update ueber Tampermonkey/Violentmonkey
