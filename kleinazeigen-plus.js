@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.36
+// @version      1.2.39
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -23,6 +23,7 @@
   const DEFAULT_SETTINGS = {
     autoSortEnabled: true,
     preferredSort: "Niedrigster Preis",
+    adDetailExtrasEnabled: true,
     notesEnabled: true,
     lupeEnabled: true,
     pdfEnabled: true,
@@ -117,6 +118,7 @@
       return {
         autoSortEnabled: parsed.autoSortEnabled !== false,
         preferredSort,
+        adDetailExtrasEnabled: parsed.adDetailExtrasEnabled !== false,
         notesEnabled: parsed.notesEnabled !== false,
         lupeEnabled: parsed.lupeEnabled !== false,
         pdfEnabled: parsed.pdfEnabled !== false,
@@ -1321,16 +1323,24 @@
     }
     const adId = parseAdIdFromLocation();
     if (!adId) return;
+
+    const settings = loadSettings();
+    const extrasOn = settings.adDetailExtrasEnabled !== false;
+    const notesEnabled = extrasOn && settings.notesEnabled !== false;
+    const pdfEnabled = extrasOn && settings.pdfEnabled !== false;
+    const anyAdDetailTool = notesEnabled || pdfEnabled;
+
     const existing = document.getElementById("ka-plus-ad-tools");
     if (existing) {
+      if (!anyAdDetailTool) {
+        existing.remove();
+        return;
+      }
       if (existing.dataset.kaPlusAdId === adId && !forceRender) return;
       existing.remove();
     }
 
-    const settings = loadSettings();
-    const notesEnabled = settings.notesEnabled !== false;
-    const pdfEnabled = settings.pdfEnabled !== false;
-    if (!notesEnabled && !pdfEnabled) return;
+    if (!anyAdDetailTool) return;
 
     const anchor = findContactColumnRoot();
     const insertParent = anchor?.parentElement || document.querySelector("#viewad-main") || document.body;
@@ -1344,10 +1354,11 @@
     root.innerHTML = `
       <style>
         #ka-plus-ad-tools {
+          --ka-plus-card-pad: 12px;
           font-family: Arial, Helvetica, sans-serif;
           color: #111;
           margin: 16px 0;
-          padding: 12px;
+          padding: var(--ka-plus-card-pad);
           border: 1px solid #ddd;
           border-radius: 10px;
           background: #fff;
@@ -1420,8 +1431,9 @@
           line-height: 1.2;
         }
         #ka-plus-ad-tools .ka-plus-notes-footer {
-          margin-top: 8px;
+          margin: var(--ka-plus-card-pad) 0 0;
           font-size: 11px;
+          line-height: 1.35;
           color: #888;
           text-align: center;
         }
@@ -1439,7 +1451,7 @@
           : ""
       }
       ${pdfEnabled ? `<button type="button" class="ka-plus-btn-pdf" id="ka-plus-pdf-btn">Als PDF speichern</button>` : ""}
-      <p class="ka-plus-notes-footer">© Kleinanzeigen Plus</p>
+      <p class="ka-plus-notes-footer">Kleinanzeigen Plus</p>
     `;
 
     if (anchor) anchor.insertAdjacentElement("afterend", root);
@@ -1905,18 +1917,18 @@
           background: #fff;
           border: 1px solid #ddd;
           border-radius: 12px;
-          padding: 12px;
+          padding: 10px;
           box-shadow: 0 8px 26px rgba(0,0,0,0.2);
         }
         #ka-enhanced-panel.open {
           display: block;
         }
         #ka-enhanced-panel h4 {
-          margin: 0 0 10px;
+          margin: 0 0 6px;
           font-size: 14px;
         }
         .ka-row {
-          margin: 8px 0;
+          margin: 5px 0;
           font-size: 13px;
         }
         .ka-row label {
@@ -1929,6 +1941,26 @@
           padding: 6px 8px;
           border-radius: 8px;
           border: 1px solid #ccc;
+        }
+        .ka-ad-extras-sub {
+          margin: 0 0 5px;
+          padding: 2px 0 2px 12px;
+          border-left: 3px solid #e8e8e8;
+          transition: opacity 0.15s ease;
+        }
+        .ka-ad-extras-sub > .ka-row {
+          margin: 2px 0;
+        }
+        .ka-ad-extras-sub.disabled {
+          opacity: 0.5;
+          pointer-events: none;
+        }
+        .ka-ad-extras-sub.disabled label {
+          color: #888;
+          cursor: not-allowed;
+        }
+        .ka-ad-extras-sub input[type="checkbox"] {
+          accent-color: #1d4b00;
         }
       </style>
       <button id="ka-enhanced-open-btn" type="button" title="Kleinanzeigen Einstellungen">
@@ -1945,15 +1977,23 @@
         </div>
         <div class="ka-row">
           <label>
-            <input id="ka-notes-enabled" type="checkbox" ${settings.notesEnabled !== false ? "checked" : ""}>
-            Notizenbereich auf Anzeigen anzeigen
+            <input id="ka-ad-detail-extras-master" type="checkbox" ${settings.adDetailExtrasEnabled !== false ? "checked" : ""}>
+            Notizen &amp; PDF auf Anzeigenseiten
           </label>
         </div>
-        <div class="ka-row">
-          <label>
-            <input id="ka-pdf-enabled" type="checkbox" ${settings.pdfEnabled !== false ? "checked" : ""}>
-            PDF speichern auf Anzeigen anzeigen
-          </label>
+        <div class="ka-ad-extras-sub" id="ka-ad-detail-extras-sub">
+          <div class="ka-row">
+            <label>
+              <input id="ka-notes-enabled" type="checkbox" ${settings.notesEnabled !== false ? "checked" : ""}>
+              Notizenbereich auf Anzeigen anzeigen
+            </label>
+          </div>
+          <div class="ka-row">
+            <label>
+              <input id="ka-pdf-enabled" type="checkbox" ${settings.pdfEnabled !== false ? "checked" : ""}>
+              PDF speichern auf Anzeigen anzeigen
+            </label>
+          </div>
         </div>
         <div class="ka-row">
           <label>
@@ -1985,10 +2025,20 @@
     const openBtn = root.querySelector("#ka-enhanced-open-btn");
     const panel = root.querySelector("#ka-enhanced-panel");
     const enabledInput = root.querySelector("#ka-sort-enabled");
+    const adDetailExtrasMasterInput = root.querySelector("#ka-ad-detail-extras-master");
+    const adDetailExtrasSub = root.querySelector("#ka-ad-detail-extras-sub");
     const notesEnabledInput = root.querySelector("#ka-notes-enabled");
     const pdfEnabledInput = root.querySelector("#ka-pdf-enabled");
     const lupeEnabledInput = root.querySelector("#ka-lupe-enabled");
     const selectInput = root.querySelector("#ka-sort-select");
+
+    function syncAdDetailExtrasSubgroupUi() {
+      const on = adDetailExtrasMasterInput?.checked ?? true;
+      if (adDetailExtrasSub) adDetailExtrasSub.classList.toggle("disabled", !on);
+      if (notesEnabledInput) notesEnabledInput.disabled = !on;
+      if (pdfEnabledInput) pdfEnabledInput.disabled = !on;
+    }
+    syncAdDetailExtrasSubgroupUi();
 
     openBtn.addEventListener("click", () => panel.classList.toggle("open"));
     document.addEventListener("click", (event) => {
@@ -1999,6 +2049,13 @@
       next.autoSortEnabled = enabledInput.checked;
       saveSettings(next);
       if (next.autoSortEnabled) applyPreferredSort();
+    });
+    adDetailExtrasMasterInput.addEventListener("change", () => {
+      const next = loadSettings();
+      next.adDetailExtrasEnabled = adDetailExtrasMasterInput.checked;
+      saveSettings(next);
+      syncAdDetailExtrasSubgroupUi();
+      applyUiSettingsNow();
     });
     notesEnabledInput.addEventListener("change", () => {
       const next = loadSettings();
