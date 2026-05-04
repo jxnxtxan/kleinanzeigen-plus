@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.21
+// @version      1.2.26
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -23,12 +23,15 @@
   const DEFAULT_SETTINGS = {
     autoSortEnabled: true,
     preferredSort: "Niedrigster Preis",
+    notesEnabled: true,
+    lupeEnabled: true,
+    pdfEnabled: true,
   };
   const VALID_SORTS = ["Neueste", "Niedrigster Preis", "Höchster Preis"];
   const SORT_URL_SLUG = {
     Neueste: null,
     "Niedrigster Preis": "preis",
-    "Höchster Preis": "preisabsteigend",
+    "Höchster Preis": "teuerste",
   };
   const SORT_ALIASES = {
     Neueste: ["neueste", "neu zuerst", "neu"],
@@ -114,6 +117,9 @@
       return {
         autoSortEnabled: parsed.autoSortEnabled !== false,
         preferredSort,
+        notesEnabled: parsed.notesEnabled !== false,
+        lupeEnabled: parsed.lupeEnabled !== false,
+        pdfEnabled: parsed.pdfEnabled !== false,
       };
     } catch {
       return { ...DEFAULT_SETTINGS };
@@ -956,7 +962,7 @@
       });
   }
 
-  function injectAdNotesAndPdf() {
+  function injectAdNotesAndPdf(forceRender = false) {
     if (!isDetailPage()) {
       const stale = document.getElementById("ka-plus-ad-tools");
       if (stale) stale.remove();
@@ -966,9 +972,14 @@
     if (!adId) return;
     const existing = document.getElementById("ka-plus-ad-tools");
     if (existing) {
-      if (existing.dataset.kaPlusAdId === adId) return;
+      if (existing.dataset.kaPlusAdId === adId && !forceRender) return;
       existing.remove();
     }
+
+    const settings = loadSettings();
+    const notesEnabled = settings.notesEnabled !== false;
+    const pdfEnabled = settings.pdfEnabled !== false;
+    if (!notesEnabled && !pdfEnabled) return;
 
     const anchor = findContactColumnRoot();
     const insertParent = anchor?.parentElement || document.querySelector("#viewad-main") || document.body;
@@ -1064,13 +1075,19 @@
           text-align: center;
         }
       </style>
+      ${
+        notesEnabled
+          ? `
       <p class="ka-plus-notes-title">MEINE NOTIZEN</p>
       <textarea class="ka-plus-notes-input" id="ka-plus-notes-ta" aria-label="Eigene Notiz zur Anzeige"></textarea>
       <div class="ka-plus-notes-actions">
         <button type="button" class="ka-plus-btn-save" id="ka-plus-notes-save">Speichern</button>
         <button type="button" class="ka-plus-btn-del" id="ka-plus-notes-del">Löschen</button>
       </div>
-      <button type="button" class="ka-plus-btn-pdf" id="ka-plus-pdf-btn">Als PDF speichern</button>
+      `
+          : ""
+      }
+      ${pdfEnabled ? `<button type="button" class="ka-plus-btn-pdf" id="ka-plus-pdf-btn">Als PDF speichern</button>` : ""}
       <p class="ka-plus-notes-footer">© Kleinanzeigen Plus</p>
     `;
 
@@ -1078,16 +1095,17 @@
     else insertParent.appendChild(root);
 
     const ta = root.querySelector("#ka-plus-notes-ta");
-    ta.value = saved;
-
-    root.querySelector("#ka-plus-notes-save").addEventListener("click", () => {
-      persistNoteForAd(adId, ta.value.trim());
-    });
-    root.querySelector("#ka-plus-notes-del").addEventListener("click", () => {
-      ta.value = "";
-      persistNoteForAd(adId, "");
-    });
-    root.querySelector("#ka-plus-pdf-btn").addEventListener("click", () => runPdfExport(adId));
+    if (ta) {
+      ta.value = saved;
+      root.querySelector("#ka-plus-notes-save")?.addEventListener("click", () => {
+        persistNoteForAd(adId, ta.value.trim());
+      });
+      root.querySelector("#ka-plus-notes-del")?.addEventListener("click", () => {
+        ta.value = "";
+        persistNoteForAd(adId, "");
+      });
+    }
+    root.querySelector("#ka-plus-pdf-btn")?.addEventListener("click", () => runPdfExport(adId));
   }
 
   function abortKaPlusLightboxFetch(lb) {
@@ -1356,6 +1374,7 @@
 
   function enhanceSearchCards() {
     if (!isSearchPage()) return;
+    if (loadSettings().lupeEnabled === false) return;
     let cards = Array.from(document.querySelectorAll("article")).filter(
       (a) => a.querySelector('a[href*="/s-anzeige/"]') && a.querySelector("img")
     );
@@ -1425,12 +1444,31 @@
     });
   }
 
+  function syncLupeUi() {
+    if (!isSearchPage()) return;
+    const lupeEnabled = loadSettings().lupeEnabled !== false;
+    if (!lupeEnabled) {
+      document.querySelectorAll(".ka-plus-lupe-btn").forEach((btn) => btn.remove());
+      document.querySelectorAll("[data-ka-plus-lupe='1']").forEach((card) => {
+        delete card.dataset.kaPlusLupe;
+      });
+      closeKaPlusLightbox();
+      return;
+    }
+    enhanceSearchCards();
+  }
+
   function scheduleKaPlusRefresh() {
     clearTimeout(kaPlusRefreshTimer);
     kaPlusRefreshTimer = window.setTimeout(() => {
       injectAdNotesAndPdf();
-      enhanceSearchCards();
+      syncLupeUi();
     }, 120);
+  }
+
+  function applyUiSettingsNow() {
+    injectAdNotesAndPdf(true);
+    syncLupeUi();
   }
 
   function createPanel() {
@@ -1541,21 +1579,6 @@
           border-radius: 8px;
           border: 1px solid #ccc;
         }
-        #ka-apply-now {
-          margin-top: 8px;
-          width: 100%;
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          border: none;
-          border-radius: 8px;
-          padding: 8px;
-          background: #1d4b00;
-          color: #fff;
-          cursor: pointer;
-          font-weight: 600;
-          text-align: center;
-        }
       </style>
       <button id="ka-enhanced-open-btn" type="button" title="Kleinanzeigen Einstellungen">
         <span class="ka-tools-icon" aria-hidden="true"></span>
@@ -1570,6 +1593,24 @@
           </label>
         </div>
         <div class="ka-row">
+          <label>
+            <input id="ka-notes-enabled" type="checkbox" ${settings.notesEnabled !== false ? "checked" : ""}>
+            Notizenbereich auf Anzeigen anzeigen
+          </label>
+        </div>
+        <div class="ka-row">
+          <label>
+            <input id="ka-pdf-enabled" type="checkbox" ${settings.pdfEnabled !== false ? "checked" : ""}>
+            PDF speichern auf Anzeigen anzeigen
+          </label>
+        </div>
+        <div class="ka-row">
+          <label>
+            <input id="ka-lupe-enabled" type="checkbox" ${settings.lupeEnabled !== false ? "checked" : ""}>
+            Lupe in der Suche anzeigen
+          </label>
+        </div>
+        <div class="ka-row">
           <label for="ka-sort-select">Gewünschte Sortierung</label>
           <select id="ka-sort-select">
             ${VALID_SORTS.map(
@@ -1580,7 +1621,6 @@
             ).join("")}
           </select>
         </div>
-        <button id="ka-apply-now" type="button">Jetzt anwenden</button>
       </div>
     `;
 
@@ -1594,8 +1634,10 @@
     const openBtn = root.querySelector("#ka-enhanced-open-btn");
     const panel = root.querySelector("#ka-enhanced-panel");
     const enabledInput = root.querySelector("#ka-sort-enabled");
+    const notesEnabledInput = root.querySelector("#ka-notes-enabled");
+    const pdfEnabledInput = root.querySelector("#ka-pdf-enabled");
+    const lupeEnabledInput = root.querySelector("#ka-lupe-enabled");
     const selectInput = root.querySelector("#ka-sort-select");
-    const applyNowBtn = root.querySelector("#ka-apply-now");
 
     openBtn.addEventListener("click", () => panel.classList.toggle("open"));
     document.addEventListener("click", (event) => {
@@ -1607,13 +1649,30 @@
       saveSettings(next);
       if (next.autoSortEnabled) applyPreferredSort();
     });
+    notesEnabledInput.addEventListener("change", () => {
+      const next = loadSettings();
+      next.notesEnabled = notesEnabledInput.checked;
+      saveSettings(next);
+      applyUiSettingsNow();
+    });
+    pdfEnabledInput.addEventListener("change", () => {
+      const next = loadSettings();
+      next.pdfEnabled = pdfEnabledInput.checked;
+      saveSettings(next);
+      applyUiSettingsNow();
+    });
+    lupeEnabledInput.addEventListener("change", () => {
+      const next = loadSettings();
+      next.lupeEnabled = lupeEnabledInput.checked;
+      saveSettings(next);
+      applyUiSettingsNow();
+    });
     selectInput.addEventListener("change", () => {
       const next = loadSettings();
       next.preferredSort = selectInput.value;
       saveSettings(next);
       if (next.autoSortEnabled) applyPreferredSort();
     });
-    applyNowBtn.addEventListener("click", applyPreferredSort);
   }
 
   function setupObservers() {
