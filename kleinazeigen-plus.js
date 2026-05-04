@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.26
+// @version      1.2.36
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -347,20 +347,187 @@
     return rows;
   }
 
+  const KA_CATEGORY_CRUMB_SEP = " > ";
+
+  /** Kein Statistik-Link („13 Anzeigen online“), sondern Anzeige eines Nutzernamens. */
+  function isPlausibleSellerNameFromProfileLink(raw) {
+    const t = String(raw || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!t || t.length > 72) return false;
+    if (/\banzeigen\s+online\b/i.test(t)) return false;
+    if (/^\d[\d\s.,]*\s+anzeigen\b/i.test(t)) return false;
+    if (/^weitere\s+anzeigen/i.test(t)) return false;
+    if (/^\d+\s*-\s*\d+/i.test(t)) return false;
+    return true;
+  }
+
   function getCategoryText() {
+    const vap = document.querySelector("#vap-brdcrmb");
+    if (vap) {
+      /** Schema.org BreadcrumbList: ListItems mit itemprop=name */
+      const listItems = [...vap.querySelectorAll("[itemprop='itemListElement'], [itemprop='itemlistelement']")];
+      if (listItems.length) {
+        const fromSchema = listItems
+          .map((el) => {
+            const nm =
+              el.querySelector("[itemprop='name'], [itemprop='Name']") ||
+              el.querySelector("a[href]");
+            return (nm?.textContent || "")
+              .replace(/\s+/g, " ")
+              .trim();
+          })
+          .filter(Boolean);
+        if (fromSchema.length >= 2) return fromSchema.join(KA_CATEGORY_CRUMB_SEP);
+        if (fromSchema.length === 1) return fromSchema[0];
+      }
+      const nameProps = [...vap.querySelectorAll("[itemprop='name'], [itemprop='Name']")].filter(
+        (el) => el.closest("#vap-brdcrmb") !== null
+      );
+      if (nameProps.length >= 2) {
+        const crumbs = nameProps
+          .map((el) => el.textContent?.replace(/\s+/g, " ").trim())
+          .filter(Boolean);
+        const dedup = [...new Set(crumbs)];
+        if (dedup.length >= 2) return dedup.join(KA_CATEGORY_CRUMB_SEP);
+      }
+      const anchors = [...vap.querySelectorAll("a[href]")]
+        .map((a) => a.textContent?.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      if (anchors.length >= 2) return anchors.join(KA_CATEGORY_CRUMB_SEP);
+      if (anchors.length === 1) return anchors[0];
+      const t = vap.innerText?.replace(/\s+/g, " ").trim() || vap.textContent?.replace(/\s+/g, " ").trim() || "";
+      if (t) {
+        /** Sichtbare Trenner aus dem UI (falls im Text vorhanden) */
+        const splitChev = t
+          .split(/\s*[›»>]\s*/g)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (splitChev.length >= 2) return splitChev.join(KA_CATEGORY_CRUMB_SEP);
+      }
+      if (t) return t;
+    }
     const nav = document.querySelector('nav[aria-label="Breadcrumb"], nav[aria-label*="readcrumb"]');
     if (!nav) return "";
     const parts = Array.from(nav.querySelectorAll("a"))
       .map((a) => a.textContent?.trim())
       .filter(Boolean);
-    return parts[parts.length - 1] || "";
+    if (!parts.length) return nav.innerText?.replace(/\s+/g, " ").trim() || "";
+    return parts.join(KA_CATEGORY_CRUMB_SEP);
+  }
+
+  /** Suchleiste: gewählte Hauptkategorie (z. B. aria-label „… - Autos“, Button-Text „Autos“). */
+  function isHeaderSearchCategoryAutos() {
+    const btn = document.querySelector("#search-category-menu-button");
+    if (!btn) return false;
+    const aria = normalizeText(btn.getAttribute("aria-label") || "");
+    if (/\bautos\b/.test(aria) || /\bauto\b/.test(aria)) return true;
+    const t = normalizeText(btn.textContent || "");
+    return t === "autos" || t === "auto";
+  }
+
+  /** Autos-Anzeige: #vap-brdcrmb, Breadcrumb-nav, oder Header-Kategorie „Autos“. */
+  function isAutosCategoryAd() {
+    if (isHeaderSearchCategoryAutos()) return true;
+    const vap = document.querySelector("#vap-brdcrmb");
+    if (vap) {
+      const t = normalizeText(vap.textContent || "");
+      if (/\bautos\b|\bauto\s*,\s*rad\b/.test(t)) return true;
+      for (const a of vap.querySelectorAll("a[href]")) {
+        const href = a.getAttribute("href") || "";
+        if (/\/s-autos\b/i.test(href) || /\/autos\//i.test(href)) return true;
+      }
+    }
+    const nav = document.querySelector('nav[aria-label="Breadcrumb"], nav[aria-label*="readcrumb"]');
+    if (!nav) return false;
+    const links = nav.querySelectorAll("a[href]");
+    for (const a of links) {
+      const href = a.getAttribute("href") || "";
+      if (/\/s-autos\b/i.test(href) || /\/autos\//i.test(href)) return true;
+      if (normalizeText(a.textContent || "") === "autos") return true;
+    }
+    return false;
+  }
+
+  /** Text aus #viewad-configuration (Ausstattungsmerkmale), Einträge mit „ | “ trennen. */
+  function getAutoEquipmentText() {
+    const el = document.querySelector("#viewad-configuration");
+    if (!el) return "";
+
+    const collectUnique = (rawParts) => {
+      const seen = new Set();
+      const out = [];
+      rawParts.forEach((raw) => {
+        const one = raw.replace(/\s+/g, " ").trim();
+        if (!one || one.length > 200) return;
+        const key = normalizeText(one);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        out.push(one);
+      });
+      return out;
+    };
+
+    /** Kleinanzeigen Fahrzeuge: <ul class="checktaglist"><li class="checktag">…</li> */
+    const fromChecktags = [...el.querySelectorAll("ul.checktaglist li.checktag, ul.checktaglist > li, li.checktag")]
+      .map((node) => node.textContent?.replace(/\s+/g, " ").trim() || "")
+      .filter(Boolean);
+    let parts = collectUnique(fromChecktags);
+
+    /** Weitere UI-Varianten: Chips als Link/Button. */
+    if (parts.length < 2) {
+      const chips = [...el.querySelectorAll("a[href],button[type='button'],button:not([type])")]
+        .map((node) => node.textContent?.replace(/\s+/g, " ").trim() || "")
+        .filter(Boolean);
+      const merged = collectUnique([...fromChecktags, ...chips]);
+      if (merged.length > parts.length) parts = merged;
+    }
+
+    /** Fallback: einzelne Blöcke als direkte Kinder (Verschachtelungsvarianten). */
+    if (parts.length < 2) {
+      const childTexts = [...el.children]
+        .map((ch) => ch.innerText?.replace(/\s+/g, " ").trim() || "")
+        .filter(Boolean);
+      const alt = collectUnique(childTexts.filter((t) => t.length < 200));
+      if (alt.length > parts.length) parts = alt;
+    }
+
+    if (parts.length >= 1) {
+      parts.sort((a, b) =>
+        normalizeText(a).localeCompare(normalizeText(b), "de", { sensitivity: "base" })
+      );
+      return parts.join(" | ");
+    }
+    const flat = el.innerText?.replace(/\s+/g, " ").trim() || "";
+    return flat;
   }
 
   function getPostedDateText() {
+    const extra = document.querySelector("#viewad-extra-info");
+    if (extra) {
+      const skipCntr = [...extra.querySelectorAll("span, time")].filter((el) => !el.closest("#viewad-cntr"));
+      for (const el of skipCntr) {
+        const t = el.textContent?.replace(/\s+/g, " ").trim() || "";
+        if (/^\d{2}\.\d{2}\.\d{4}$/.test(t)) return t;
+      }
+      const timeInExtra = extra.querySelector("time[datetime]");
+      if (timeInExtra) {
+        return (
+          timeInExtra.textContent?.trim() || timeInExtra.getAttribute("datetime") || ""
+        );
+      }
+    }
     const main = document.querySelector("#viewad-main, main, article");
     if (!main) return "";
     const timeEl = main.querySelector("time[datetime]");
     return timeEl?.textContent?.trim() || timeEl?.getAttribute("datetime") || "";
+  }
+
+  function getViewCountText() {
+    const n = document.querySelector("#viewad-cntr-num");
+    const raw = n?.textContent?.replace(/\s+/g, " ").trim() || "";
+    const t = raw.replace(/\./g, "").replace(/\s/g, "");
+    return /^\d+$/.test(t) ? t : "";
   }
 
   function getLocationText() {
@@ -377,28 +544,90 @@
 
   function parseSellerInfo() {
     const box =
-      document.querySelector("#viewad-contact, [data-testid='seller-card'], [class*='seller']") ||
+      document.querySelector("#viewad-contact, #viewad-profile-box, [data-testid='seller-card'], [class*='seller']") ||
       document.body;
     const lines = (box.innerText || "")
       .split("\n")
       .map((line) => line.replace(/\s+/g, " ").trim())
       .filter(Boolean);
-    const type =
-      lines.find((line) => /privater nutzer|gewerblicher nutzer|gewerblicher anbieter/i.test(line)) || "";
-    const activeLine = lines.find((line) => /aktiv seit/i.test(line)) || "";
-    const activeSince = activeLine.replace(/^.*aktiv seit\s*/i, "").trim();
-    const profileLink = Array.from(box.querySelectorAll("a[href]")).find((a) =>
-      /\/s-bestandsliste\.html|\/pro\//i.test(a.getAttribute("href") || "")
+
+    const profileHrefCandidates = [...box.querySelectorAll("a[href]")].filter((a) => {
+      const href = a.getAttribute("href") || "";
+      return /s-bestandsliste\.html|[?&](?:userId|userid)=\d/i.test(href) || /\/pro\//i.test(href);
+    });
+
+    const plausibleCandidates = profileHrefCandidates.filter((a) =>
+      isPlausibleSellerNameFromProfileLink(a.textContent)
     );
+
+    let profileLink =
+      plausibleCandidates.find((a) => typeof a.matches === "function" && a.matches("a.userprofile-vip")) || null;
+
+    if (!profileLink && plausibleCandidates.length) {
+      profileLink = plausibleCandidates.reduce((best, a) => {
+        const len = String(a?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim().length;
+        const bestLen = String(best?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim().length;
+        return len > bestLen ? a : best;
+      });
+    }
+
+    if (!profileLink) {
+      profileLink =
+        profileHrefCandidates.find((a) => typeof a.matches === "function" && a.matches("a.userprofile-vip")) || null;
+    }
+
+    const detailSpans = [...box.querySelectorAll("span[class*='userprofile-vip-details-text']")];
+    const detailTexts = detailSpans
+      .map((el) => el.textContent?.replace(/\s+/g, " ").trim() || "")
+      .filter(Boolean);
+
+    let type =
+      detailTexts.find((line) => /privater nutzer|gewerblicher nutzer|gewerblicher anbieter/i.test(line)) ||
+      "";
+
+    let activeSince = "";
+    const activeFromSpan = detailTexts.find((line) => /aktiv seit/i.test(line));
+    if (activeFromSpan) {
+      activeSince = activeFromSpan.replace(/^.*?aktiv seit\s*/i, "").trim();
+    }
+
+    const activeLine = lines.find((line) => /aktiv seit/i.test(line)) || "";
+    if (!activeSince && activeLine) activeSince = activeLine.replace(/^.*?aktiv seit\s*/i, "").trim();
+    if (!type) {
+      type = lines.find((line) => /privater nutzer|gewerblicher nutzer|gewerblicher anbieter/i.test(line)) || "";
+    }
+
     const profileHref = profileLink?.getAttribute("href") || "";
     const userIdMatch =
       profileHref.match(/[?&](?:userId|userid|u)=(\d+)/i) ||
       profileHref.match(/\/(?:u|user)\/(\d+)/i) ||
       null;
     const userId = userIdMatch ? userIdMatch[1] : "";
+
+    let nameFromProfile = profileLink?.textContent
+      ? String(profileLink.textContent)
+          .replace(/\s+/g, " ")
+          .trim()
+      : "";
+    if (nameFromProfile && !isPlausibleSellerNameFromProfileLink(nameFromProfile)) {
+      nameFromProfile = "";
+    }
+
     const name =
-      (profileLink?.textContent || "").trim() ||
-      lines.find((line) => !/^(lb|top zufriedenheit|sehr freundlich|zuverlässig|folgen|anzeige melden)$/i.test(line)) ||
+      nameFromProfile ||
+      lines.find(
+        (line) =>
+          isPlausibleSellerNameFromProfileLink(line) &&
+          !/^(lb|top zufriedenheit|sehr freundlich|zuverlässig|folgen|anzeige melden|privater nutzer|gewerblicher.*)$/i.test(
+            line
+          ) &&
+          /^[A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß\s.'-]+$/.test(line) &&
+          line.length >= 2
+      ) ||
       "";
 
     return { name, userId, type, activeSince };
@@ -627,6 +856,7 @@
         <p style="margin:4px 0;"><strong>Preis</strong> ${escapeHtml(data.price)}</p>
         <p style="margin:4px 0;"><strong>Ort</strong> ${escapeHtml(data.location)}</p>
         <p style="margin:4px 0;"><strong>Eingestellt</strong> ${escapeHtml(data.postedDate)}</p>
+        <p style="margin:4px 0;"><strong>Aufrufe</strong> ${escapeHtml(data.viewCount)}</p>
         <p style="margin:4px 0;"><strong>Kategorie</strong> ${escapeHtml(data.category)}</p>
         <p style="margin:4px 0;word-break:break-all;"><strong>URL</strong> ${escapeHtml(data.url)}</p>
         <h2 style="font-size:15px;margin:16px 0 6px;">Verkäufer</h2>
@@ -636,6 +866,12 @@
         <p style="margin:4px 0;"><strong>Aktiv seit</strong> ${escapeHtml(data.sellerActiveSince)}</p>
         <h2 style="font-size:15px;margin:16px 0 6px;">Details</h2>
         <table style="width:100%;border-collapse:collapse;">${rowsHtml || `<tr><td>${escapeHtml("(Keine strukturierten Merkmale gefunden)")}</td></tr>`}</table>
+        ${
+          data.equipmentText
+            ? `<h2 style="font-size:15px;margin:16px 0 6px;">Ausstattung</h2>
+        <p style="margin:4px 0;white-space:pre-wrap;">${escapeHtml(data.equipmentText)}</p>`
+            : ""
+        }
         <h2 style="font-size:15px;margin:16px 0 6px;">Beschreibung</h2>
         <p style="margin:4px 0;white-space:pre-wrap;">${escapeHtml(data.description)}</p>
         <h2 style="font-size:15px;margin:16px 0 6px;">Bilder (${imgs.length})</h2>
@@ -743,7 +979,29 @@
     const pageH = doc.internal.pageSize.getHeight();
     const margin = 14;
     const contentW = pageW - margin * 2;
+    const PDF_SECTION_ORPHAN_MAX = 0.2;
+    /** Linie + Abstand vor Abschnittstitel in mm (wie in section()). */
+    const PDF_SECTION_HEAD_MM = 19;
+
     let y = margin;
+
+    const estimateWrappedLinesHeight = (size, gapMm, widthMm, text) => {
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(size);
+      const lines = doc.splitTextToSize(String(text || ""), widthMm);
+      return Math.max(lines.length, 1) * gapMm;
+    };
+
+    const avoidSmallTailOnPage = (blockHeightMm) => {
+      if (blockHeightMm <= 0) return;
+      const usableBottom = pageH - margin;
+      const remaining = usableBottom - y;
+      if (blockHeightMm <= remaining) return;
+      if (remaining <= 0.5 || remaining / blockHeightMm < PDF_SECTION_ORPHAN_MAX) {
+        doc.addPage();
+        y = margin;
+      }
+    };
 
     const ensureRoom = (needed = 6) => {
       if (y + needed <= pageH - margin) return;
@@ -789,35 +1047,75 @@
       y += 5.4;
     };
 
-    writeLine(data.title || "Anzeige", 19.5, true, 8.6, [18, 22, 30]);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(18, 22, 30);
+    doc.setFontSize(19.5);
+    const titleLines = doc.splitTextToSize(String(data.title || "Anzeige"), contentW);
+    const titleGap = 7.8;
+    titleLines.forEach((line) => {
+      ensureRoom(titleGap + 1);
+      doc.text(String(line), margin, y);
+      y += titleGap;
+    });
     writeKeyValue("Anzeigen-ID", data.adId);
     writeKeyValue("Preis", data.price);
     writeKeyValue("Ort", data.location);
     writeKeyValue("Eingestellt", data.postedDate);
+    writeKeyValue("Aufrufe", data.viewCount);
     writeKeyValue("Kategorie", data.category);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(11);
     doc.setTextColor(98, 107, 121);
     ensureRoom(5.4);
     doc.text("URL", margin, y);
-    const urlLines = doc.splitTextToSize(String(data.url || "-"), contentW - 58);
-    urlLines.forEach((line, idx) => {
-      ensureRoom(5.1);
-      doc.setFont("helvetica", idx === 0 ? "bold" : "normal");
+    const urlHrefRaw = String(data.url || "").trim();
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    const urlLines = doc.splitTextToSize(urlHrefRaw || "-", contentW - 58);
+    const urlX = margin + 42;
+    const urlLineGapMm = 5.1;
+    const urlIsWeb = /^https?:\/\//i.test(urlHrefRaw);
+    urlLines.forEach((line) => {
+      ensureRoom(urlLineGapMm + 1);
       doc.setTextColor(25, 109, 210);
-      doc.text(String(line), margin + 42, y);
-      y += 5.1;
+      const ln = String(line);
+      if (urlIsWeb && typeof doc.textWithLink === "function") {
+        doc.textWithLink(ln, urlX, y, { url: urlHrefRaw });
+      } else {
+        doc.text(ln, urlX, y);
+        if (
+          urlIsWeb &&
+          typeof doc.link === "function" &&
+          typeof doc.getTextWidth === "function"
+        ) {
+          const txtW = doc.getTextWidth(ln);
+          const linkH = Math.max(urlLineGapMm * 0.92, 4.2);
+          doc.link(urlX, y - linkH * 0.76, txtW + 2, linkH, { url: urlHrefRaw });
+        }
+      }
+      y += urlLineGapMm;
     });
 
+    const sellerBodyMm = 4 * 5.4;
+    avoidSmallTailOnPage(PDF_SECTION_HEAD_MM + sellerBodyMm);
     section("Verkäufer");
     writeKeyValue("Name", data.sellerName);
     writeKeyValue("Nutzer-ID", data.sellerUserId);
     writeKeyValue("Typ", data.sellerType);
     writeKeyValue("Aktiv seit", data.sellerActiveSince);
 
-    section("Details");
     const details = Array.isArray(data.detailRows) ? data.detailRows : [];
-    if (!details.length) writeLine("(Keine strukturierten Merkmale gefunden)", 10.2, false, 4.8, [98, 107, 121]);
+    let detailsBodyMm = details.length ? 0 : 4.8;
+    doc.setFontSize(10.6);
+    details.forEach((row) => {
+      const m = String(row || "").match(/^([^:]+?)\s+(.+)$/);
+      if (m) detailsBodyMm += 5.4;
+      else detailsBodyMm += estimateWrappedLinesHeight(10.6, 4.8, contentW, row);
+    });
+    avoidSmallTailOnPage(PDF_SECTION_HEAD_MM + detailsBodyMm);
+    section("Details");
+    if (!details.length)
+      writeLine("(Keine strukturierten Merkmale gefunden)", 10.2, false, 4.8, [98, 107, 121]);
     details.forEach((row) => {
       const m = String(row || "").match(/^([^:]+?)\s+(.+)$/);
       if (m) {
@@ -827,8 +1125,19 @@
       }
     });
 
+    const equipmentText = String(data.equipmentText || "").trim();
+    if (equipmentText) {
+      const equipBodyMm = estimateWrappedLinesHeight(11.2, 5.2, contentW, equipmentText);
+      avoidSmallTailOnPage(PDF_SECTION_HEAD_MM + equipBodyMm);
+      section("Ausstattung");
+      writeWrapped(equipmentText, 11.2, false, 5.2, [28, 33, 44]);
+    }
+
+    const descText = data.description || "(Keine Beschreibung)";
+    const descBodyMm = estimateWrappedLinesHeight(11.2, 5.35, contentW, descText);
+    avoidSmallTailOnPage(PDF_SECTION_HEAD_MM + descBodyMm);
     section("Beschreibung");
-    writeWrapped(data.description || "(Keine Beschreibung)", 11.2, false, 5.35, [28, 33, 44]);
+    writeWrapped(descText, 11.2, false, 5.35, [28, 33, 44]);
 
     const images = Array.isArray(data.imageUrls) ? data.imageUrls : [];
     if (!images.length) writeLine("(Keine Bilder erkannt)", 10.2, false, 4.8, [98, 107, 121]);
@@ -838,6 +1147,7 @@
     const gridGap = 3.8;
     const cellW = (contentW - gridGap) / 2;
     const cellH = 59;
+    let lastPhotoPageBodyBottomYm = margin;
     for (let idx = 0; idx < total; idx += perPage) {
       doc.addPage();
       y = margin;
@@ -894,22 +1204,59 @@
       doc.setFontSize(9);
       doc.setTextColor(122, 130, 143);
       doc.text(`${Math.floor(idx / perPage) + 1} / ${pages}`, pageW / 2, pageH - 8, { align: "center" });
+      {
+        const maxRowIdx =
+          chunk.length === 0 ? 0 : Math.floor((chunk.length - 1) / 2);
+        /** Unterkante Bildraster nur hier – NICHT bis pageH forcieren („Seite 4/4“ liegt im Freiraum darunter). */
+        const gridBottomYm = margin + 8 + maxRowIdx * (cellH + 10) + 6 + cellH;
+        lastPhotoPageBodyBottomYm = gridBottomYm + 8;
+      }
     }
     logPdfRuntime("jspdf-images-embedded", {
       requested: total,
       embeddedCount,
     });
 
-    doc.setPage(1);
+    /** Footer möglichst auf der zuletzt befüllten Seite; nur bei Kollision neue Seite. */
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8.8);
     doc.setTextColor(112, 120, 134);
-    doc.text(`Exportiert am: ${new Date().toLocaleString("de-DE")}`, margin, pageH - 19);
-    doc.text("Quelle: kleinanzeigen.de • PDF erstellt mit: Kleinanzeigen Plus", margin, pageH - 14.2);
     const hint =
       "Hinweis: Dieses PDF wurde automatisch von Kleinanzeigen Plus erstellt und dient ausschließlich der persönlichen Dokumentation. Kleinanzeigen Plus ist nicht verantwortlich für den Inhalt der Anzeige. Alle Rechte am Inhalt (Texte, Bilder) verbleiben beim jeweiligen Ersteller bzw. Rechteinhaber. Eine Weiterverbreitung oder kommerzielle Nutzung ist ohne ausdrückliche Genehmigung nicht gestattet.";
-    const hintLines = doc.splitTextToSize(hint, contentW);
-    hintLines.slice(0, 2).forEach((line, idx) => doc.text(String(line), margin, pageH - 9.6 + idx * 4));
+    const hintLinesFull = doc.splitTextToSize(hint, contentW);
+    const footerLineGap = 4.1;
+    const maxHintInFooter = 6;
+    const hintLines = hintLinesFull.slice(0, maxHintInFooter);
+    /** Baseline der obersten Footer-Zeile („Exportiert am …“), analog zur Zeichen-Schleife unten. */
+    const estimateFooterExportBaselineYm = () => {
+      let yf = pageH - margin;
+      for (let i = hintLines.length - 1; i >= 0; i -= 1) {
+        yf -= footerLineGap;
+      }
+      yf -= 1.2;
+      yf -= footerLineGap;
+      return yf;
+    };
+
+    const lastPgNum = doc.getNumberOfPages();
+    doc.setPage(lastPgNum);
+    const bodyDeepYm = total > 0 ? lastPhotoPageBodyBottomYm : y;
+    const footerExportBaselineYm = estimateFooterExportBaselineYm();
+    /** Inhalt liegt bis bodyDeepYm (große y nach unten); Footer-Block beginnt ab der Export-Baseline (kleinere y weiter oben). Überlappen, wenn sich die Bereiche schneiden. */
+    if (bodyDeepYm >= footerExportBaselineYm) {
+      doc.addPage();
+      doc.setPage(doc.getNumberOfPages());
+    }
+    /** Von unten nach oben aufbauen, damit nichts über den unteren Rand hinausragt */
+    let yFoot = pageH - margin;
+    for (let i = hintLines.length - 1; i >= 0; i -= 1) {
+      doc.text(String(hintLines[i]), margin, yFoot);
+      yFoot -= footerLineGap;
+    }
+    yFoot -= 1.2;
+    doc.text("Quelle: kleinanzeigen.de • PDF erstellt mit: Kleinanzeigen Plus", margin, yFoot);
+    yFoot -= footerLineGap;
+    doc.text(`Exportiert am: ${new Date().toLocaleString("de-DE")}`, margin, yFoot);
 
     const out = doc.output("blob");
     if (!out || out.size < 800) {
@@ -929,13 +1276,17 @@
     logPdfRuntime("runPdfExport-start");
     const title = getAdTitleText() || "Anzeige";
     const seller = parseSellerInfo();
+    const category = getCategoryText();
+    const equipmentText = isAutosCategoryAd() ? getAutoEquipmentText() : "";
     const data = {
       adId: adId || parseAdIdFromLocation() || "",
       title,
       price: getAdPriceText(),
       location: getLocationText(),
       postedDate: getPostedDateText(),
-      category: getCategoryText(),
+      viewCount: getViewCountText(),
+      category,
+      equipmentText,
       url: window.location.href,
       sellerName: seller.name,
       sellerUserId: seller.userId,
