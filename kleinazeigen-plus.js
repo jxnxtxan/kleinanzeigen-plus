@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.39
+// @version      1.2.44
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -282,19 +282,60 @@
     return null;
   }
 
-  function findContactColumnRoot() {
-    const merk = Array.from(document.querySelectorAll("button, a")).find((el) => {
-      const t = (el.textContent || "").trim();
-      return t.includes("Zur Merkliste") || t.includes("Merkliste hinzufügen");
-    });
-    if (!merk) return null;
-    let n = merk;
-    for (let i = 0; i < 14 && n; i++) {
-      const t = n.textContent || "";
-      if (t.includes("Nachricht schreiben") && t.includes("Zur Merkliste")) return n;
-      n = n.parentElement;
+  function normalizeActionLabelText(el) {
+    return (el?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  /** Sidebar-Merkliste („hinzufügen“ oder nach Entfernen auch „entfernen“). */
+  function isWatchlistActionElement(el) {
+    const t = normalizeActionLabelText(el);
+    return (
+      t.includes("Zur Merkliste") ||
+      t.includes("Merkliste hinzufügen") ||
+      t.includes("Von Merkliste") ||
+      t.includes("Merkliste entfernen")
+    );
+  }
+
+  function findAdDetailWatchlistButton() {
+    return Array.from(document.querySelectorAll("button, a")).find(isWatchlistActionElement);
+  }
+
+  function findAnzeigeTeilenButton() {
+    return Array.from(document.querySelectorAll("button, a")).find((el) =>
+      normalizeActionLabelText(el).includes("Anzeige teilen")
+    );
+  }
+
+  /**
+   * Liegt der Button in einer horizontalen Flex-Zeile, wäre insertAdjacentElement(afterend)
+   * ein zweites Spalten-Element. Dann Karte unter der ganzen Zeile einfügen (nach dem Row-Container).
+   */
+  function findInsertionAnchorAfterButton(btn) {
+    let el = btn.parentElement;
+    while (el && el !== document.body) {
+      const cs = window.getComputedStyle(el);
+      const flexRow =
+        (cs.display === "flex" || cs.display === "inline-flex") &&
+        (cs.flexDirection === "row" || cs.flexDirection === "row-reverse");
+      if (flexRow) return el;
+      el = el.parentElement;
     }
-    return merk.parentElement;
+    return btn;
+  }
+
+  /**
+   * Karten-Anker: direkt unter „Anzeige teilen“ (bzw. unter dessen Flex-Zeile).
+   * Fallback: nach Merkliste, falls Teilen-Button fehlt.
+   */
+  function findAdNotesInsertionPoint() {
+    const share = findAnzeigeTeilenButton();
+    if (share) return { node: findInsertionAnchorAfterButton(share), position: "afterend" };
+
+    const watch = findAdDetailWatchlistButton();
+    if (watch) return { node: findInsertionAnchorAfterButton(watch), position: "afterend" };
+
+    return null;
   }
 
   function escapeHtml(s) {
@@ -1342,8 +1383,8 @@
 
     if (!anyAdDetailTool) return;
 
-    const anchor = findContactColumnRoot();
-    const insertParent = anchor?.parentElement || document.querySelector("#viewad-main") || document.body;
+    const insertion = findAdNotesInsertionPoint();
+    const insertParent = document.querySelector("#viewad-main") || document.body;
 
     const root = document.createElement("div");
     root.id = "ka-plus-ad-tools";
@@ -1357,12 +1398,16 @@
           --ka-plus-card-pad: 12px;
           font-family: Arial, Helvetica, sans-serif;
           color: #111;
-          margin: 16px 0;
+          margin: 16px 0 12px;
           padding: var(--ka-plus-card-pad);
           border: 1px solid #ddd;
           border-radius: 10px;
           background: #fff;
           box-sizing: border-box;
+          width: 100%;
+          max-width: 100%;
+          align-self: stretch;
+          min-width: 0;
         }
         #ka-plus-ad-tools .ka-plus-notes-title {
           font-weight: 700;
@@ -1454,8 +1499,11 @@
       <p class="ka-plus-notes-footer">Kleinanzeigen Plus</p>
     `;
 
-    if (anchor) anchor.insertAdjacentElement("afterend", root);
-    else insertParent.appendChild(root);
+    if (insertion?.node) {
+      insertion.node.insertAdjacentElement(insertion.position, root);
+    } else {
+      insertParent.appendChild(root);
+    }
 
     const ta = root.querySelector("#ka-plus-notes-ta");
     if (ta) {
@@ -1941,6 +1989,24 @@
           padding: 6px 8px;
           border-radius: 8px;
           border: 1px solid #ccc;
+          box-sizing: border-box;
+        }
+        .ka-sort-row {
+          display: flex;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 5px;
+          margin-top: 0;
+        }
+        .ka-sort-row > label {
+          display: block;
+          margin: 0;
+          line-height: 1.35;
+        }
+        #ka-sort-select:focus-visible {
+          outline: 2px solid #5b39c6;
+          outline-offset: 0;
+          box-shadow: none;
         }
         .ka-ad-extras-sub {
           margin: 0 0 5px;
@@ -2001,7 +2067,7 @@
             Lupe in der Suche anzeigen
           </label>
         </div>
-        <div class="ka-row">
+        <div class="ka-row ka-sort-row">
           <label for="ka-sort-select">Gewünschte Sortierung</label>
           <select id="ka-sort-select">
             ${VALID_SORTS.map(
