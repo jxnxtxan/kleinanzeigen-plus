@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.44
-// @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Tools-Panel.
+// @version      1.2.45
+// @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
 // @supportURL   https://github.com/jxnxtxan/kleinanzeigen-plus/issues
@@ -27,6 +27,7 @@
     notesEnabled: true,
     lupeEnabled: true,
     pdfEnabled: true,
+    hideTopAdsEnabled: false,
   };
   const VALID_SORTS = ["Neueste", "Niedrigster Preis", "Höchster Preis"];
   const SORT_URL_SLUG = {
@@ -122,6 +123,7 @@
         notesEnabled: parsed.notesEnabled !== false,
         lupeEnabled: parsed.lupeEnabled !== false,
         pdfEnabled: parsed.pdfEnabled !== false,
+        hideTopAdsEnabled: parsed.hideTopAdsEnabled === true,
       };
     } catch {
       return { ...DEFAULT_SETTINGS };
@@ -1869,6 +1871,22 @@
     enhanceSearchCards();
   }
 
+  function ensureHideTopAdsStylesheet() {
+    if (document.getElementById("ka-plus-hide-top-ads-style")) return;
+    const el = document.createElement("style");
+    el.id = "ka-plus-hide-top-ads-style";
+    el.textContent =
+      "html.ka-plus-hide-top-ads #srchrslt-adtable li.is-topad," +
+      "html.ka-plus-hide-top-ads li.ad-listitem.is-topad { display: none !important; }";
+    document.documentElement.appendChild(el);
+  }
+
+  function applyHideTopAdsStyle() {
+    ensureHideTopAdsStylesheet();
+    const on = loadSettings().hideTopAdsEnabled === true;
+    document.documentElement.classList.toggle("ka-plus-hide-top-ads", on);
+  }
+
   function scheduleKaPlusRefresh() {
     clearTimeout(kaPlusRefreshTimer);
     kaPlusRefreshTimer = window.setTimeout(() => {
@@ -1880,6 +1898,7 @@
   function applyUiSettingsNow() {
     injectAdNotesAndPdf(true);
     syncLupeUi();
+    applyHideTopAdsStyle();
   }
 
   function createPanel() {
@@ -2067,6 +2086,12 @@
             Lupe in der Suche anzeigen
           </label>
         </div>
+        <div class="ka-row">
+          <label>
+            <input id="ka-hide-top-ads" type="checkbox" ${settings.hideTopAdsEnabled === true ? "checked" : ""}>
+            TOP-Anzeigen in Suchergebnissen ausblenden
+          </label>
+        </div>
         <div class="ka-row ka-sort-row">
           <label for="ka-sort-select">Gewünschte Sortierung</label>
           <select id="ka-sort-select">
@@ -2096,6 +2121,7 @@
     const notesEnabledInput = root.querySelector("#ka-notes-enabled");
     const pdfEnabledInput = root.querySelector("#ka-pdf-enabled");
     const lupeEnabledInput = root.querySelector("#ka-lupe-enabled");
+    const hideTopAdsInput = root.querySelector("#ka-hide-top-ads");
     const selectInput = root.querySelector("#ka-sort-select");
 
     function syncAdDetailExtrasSubgroupUi() {
@@ -2141,6 +2167,12 @@
       saveSettings(next);
       applyUiSettingsNow();
     });
+    hideTopAdsInput.addEventListener("change", () => {
+      const next = loadSettings();
+      next.hideTopAdsEnabled = hideTopAdsInput.checked;
+      saveSettings(next);
+      applyHideTopAdsStyle();
+    });
     selectInput.addEventListener("change", () => {
       const next = loadSettings();
       next.preferredSort = selectInput.value;
@@ -2167,5 +2199,6 @@
   createPanel();
   setupObservers();
   applyPreferredSort();
+  applyHideTopAdsStyle();
   scheduleKaPlusRefresh();
 })();
