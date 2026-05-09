@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.51
+// @version      1.2.57
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -25,6 +25,7 @@
     preferredSort: "Niedrigster Preis",
     adDetailExtrasEnabled: true,
     notesEnabled: true,
+    watchlistNotesEnabled: true,
     lupeEnabled: true,
     pdfEnabled: true,
     hideTopAdsEnabled: false,
@@ -132,6 +133,7 @@
         preferredSort,
         adDetailExtrasEnabled: parsed.adDetailExtrasEnabled !== false,
         notesEnabled: parsed.notesEnabled !== false,
+        watchlistNotesEnabled: parsed.watchlistNotesEnabled !== false,
         lupeEnabled: parsed.lupeEnabled !== false,
         pdfEnabled: parsed.pdfEnabled !== false,
         hideTopAdsEnabled: parsed.hideTopAdsEnabled === true,
@@ -1803,14 +1805,17 @@
     style.textContent = `
       .ka-plus-card-note {
         margin: 0;
-        padding: 8px 10px;
+        padding: 8px 10px 24px;
         border: 1px solid #ffe08a;
         border-radius: 6px;
         background: #fffaf0;
-        width: 320px;
+        width: 380px;
         max-width: 100%;
-        min-height: 88px;
+        height: 98px;
         box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        position: relative;
       }
       article.ka-plus-card-note-host {
         position: relative;
@@ -1820,6 +1825,12 @@
         bottom: 14px;
         right: 14px;
         z-index: 2;
+      }
+      article.ka-plus-card-note-host.ka-plus-card-note-expanded {
+        padding-bottom: 86px;
+      }
+      article.ka-plus-card-note-host .ka-plus-card-note.is-expanded {
+        height: 164px;
       }
       .ka-plus-card-note-title {
         margin: 0 0 4px;
@@ -1835,6 +1846,36 @@
         color: #333;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+      }
+      .ka-plus-card-note.is-expanded .ka-plus-card-note-text {
+        overflow-y: auto;
+      }
+      .ka-plus-card-note-toggle {
+        margin: 0;
+        position: absolute;
+        right: 10px;
+        bottom: 8px;
+        padding: 0;
+        border: 0;
+        background: transparent !important;
+        box-shadow: none !important;
+        appearance: none;
+        color: #6b4d00;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        text-decoration: none;
+        line-height: 1.2;
+      }
+      .ka-plus-card-note-toggle:hover,
+      .ka-plus-card-note-toggle:focus-visible {
+        text-decoration: underline;
+      }
+      .ka-plus-card-note-toggle[hidden] {
+        display: none !important;
       }
     `;
     document.documentElement.appendChild(style);
@@ -1844,6 +1885,7 @@
     document.querySelectorAll(".ka-plus-card-note").forEach((el) => el.remove());
     document.querySelectorAll("article.ka-plus-card-note-host").forEach((card) => {
       card.classList.remove("ka-plus-card-note-host");
+      card.classList.remove("ka-plus-card-note-expanded");
     });
   }
 
@@ -1851,10 +1893,41 @@
     return card;
   }
 
+  function updateCardNoteOverflowUi(root) {
+    const textEl = root.querySelector(".ka-plus-card-note-text");
+    const toggle = root.querySelector(".ka-plus-card-note-toggle");
+    if (!textEl || !toggle) return;
+
+    const wasExpanded = root.classList.contains("is-expanded");
+    root.classList.remove("is-expanded");
+    const hasOverflow = textEl.scrollHeight > textEl.clientHeight + 1;
+
+    if (!hasOverflow) {
+      toggle.hidden = true;
+      root.classList.remove("is-expanded");
+      root.closest("article")?.classList.remove("ka-plus-card-note-expanded");
+      toggle.textContent = "Mehr anzeigen";
+      return;
+    }
+
+    toggle.hidden = false;
+    if (wasExpanded) {
+      root.classList.add("is-expanded");
+      root.closest("article")?.classList.add("ka-plus-card-note-expanded");
+      toggle.textContent = "Weniger anzeigen";
+    } else {
+      root.closest("article")?.classList.remove("ka-plus-card-note-expanded");
+      toggle.textContent = "Mehr anzeigen";
+    }
+  }
+
   function renderNotesOnListingCards() {
-    if (!isSearchPage() && !isWatchlistPage()) return;
+    if (!isWatchlistPage()) return;
     const settings = loadSettings();
-    const notesVisible = settings.adDetailExtrasEnabled !== false && settings.notesEnabled !== false;
+    const notesVisible =
+      settings.adDetailExtrasEnabled !== false &&
+      settings.notesEnabled !== false &&
+      settings.watchlistNotesEnabled !== false;
     if (!notesVisible) {
       clearCardNotes();
       return;
@@ -1884,13 +1957,21 @@
         root.innerHTML = `
           <p class="ka-plus-card-note-title">MEINE NOTIZ</p>
           <p class="ka-plus-card-note-text"></p>
+          <button type="button" class="ka-plus-card-note-toggle" hidden>Mehr anzeigen</button>
         `;
+        root.querySelector(".ka-plus-card-note-toggle")?.addEventListener("click", () => {
+          const expanded = root.classList.toggle("is-expanded");
+          const toggle = root.querySelector(".ka-plus-card-note-toggle");
+          card.classList.toggle("ka-plus-card-note-expanded", expanded);
+          if (toggle) toggle.textContent = expanded ? "Weniger anzeigen" : "Mehr anzeigen";
+        });
         const target = findCardNoteInsertionTarget(card);
         target.appendChild(root);
       }
 
       const textEl = root.querySelector(".ka-plus-card-note-text");
       if (textEl) textEl.textContent = note;
+      updateCardNoteOverflowUi(root);
       card.classList.add("ka-plus-card-note-host");
     });
   }
@@ -2187,6 +2268,12 @@
           </div>
           <div class="ka-row">
             <label>
+              <input id="ka-watchlist-notes-enabled" type="checkbox" ${settings.watchlistNotesEnabled !== false ? "checked" : ""}>
+              Notiz in Merkliste anzeigen
+            </label>
+          </div>
+          <div class="ka-row">
+            <label>
               <input id="ka-pdf-enabled" type="checkbox" ${settings.pdfEnabled !== false ? "checked" : ""}>
               PDF speichern auf Anzeigen anzeigen
             </label>
@@ -2231,6 +2318,7 @@
     const adDetailExtrasMasterInput = root.querySelector("#ka-ad-detail-extras-master");
     const adDetailExtrasSub = root.querySelector("#ka-ad-detail-extras-sub");
     const notesEnabledInput = root.querySelector("#ka-notes-enabled");
+    const watchlistNotesEnabledInput = root.querySelector("#ka-watchlist-notes-enabled");
     const pdfEnabledInput = root.querySelector("#ka-pdf-enabled");
     const lupeEnabledInput = root.querySelector("#ka-lupe-enabled");
     const hideTopAdsInput = root.querySelector("#ka-hide-top-ads");
@@ -2240,6 +2328,7 @@
       const on = adDetailExtrasMasterInput?.checked ?? true;
       if (adDetailExtrasSub) adDetailExtrasSub.classList.toggle("disabled", !on);
       if (notesEnabledInput) notesEnabledInput.disabled = !on;
+      if (watchlistNotesEnabledInput) watchlistNotesEnabledInput.disabled = !on;
       if (pdfEnabledInput) pdfEnabledInput.disabled = !on;
     }
     syncAdDetailExtrasSubgroupUi();
@@ -2264,6 +2353,12 @@
     notesEnabledInput.addEventListener("change", () => {
       const next = loadSettings();
       next.notesEnabled = notesEnabledInput.checked;
+      saveSettings(next);
+      applyUiSettingsNow();
+    });
+    watchlistNotesEnabledInput.addEventListener("change", () => {
+      const next = loadSettings();
+      next.watchlistNotesEnabled = watchlistNotesEnabledInput.checked;
       saveSettings(next);
       applyUiSettingsNow();
     });
