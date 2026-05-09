@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.45
+// @version      1.2.51
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -73,9 +73,20 @@
     return p.startsWith("/s-") && !p.startsWith("/s-anzeige/");
   }
 
+  function isWatchlistPage() {
+    return window.location.pathname.startsWith("/m-merkliste");
+  }
+
   function parseAdIdFromLocation() {
     const seg = window.location.pathname.split("/").filter(Boolean).pop() || "";
     const m = seg.match(/^(\d{6,})/);
+    return m ? m[1] : null;
+  }
+
+  function parseAdIdFromHref(href) {
+    if (!href) return null;
+    const absHref = new URL(href, window.location.origin).href;
+    const m = absHref.match(/\/s-anzeige\/[^/]*\/(\d{6,})(?:-|$|[/?#])/);
     return m ? m[1] : null;
   }
 
@@ -1785,6 +1796,105 @@
     return img || null;
   }
 
+  function ensureCardNotesStylesheet() {
+    if (document.getElementById("ka-plus-card-note-style")) return;
+    const style = document.createElement("style");
+    style.id = "ka-plus-card-note-style";
+    style.textContent = `
+      .ka-plus-card-note {
+        margin: 0;
+        padding: 8px 10px;
+        border: 1px solid #ffe08a;
+        border-radius: 6px;
+        background: #fffaf0;
+        width: 320px;
+        max-width: 100%;
+        min-height: 88px;
+        box-sizing: border-box;
+      }
+      article.ka-plus-card-note-host {
+        position: relative;
+      }
+      article.ka-plus-card-note-host .ka-plus-card-note {
+        position: absolute;
+        bottom: 14px;
+        right: 14px;
+        z-index: 2;
+      }
+      .ka-plus-card-note-title {
+        margin: 0 0 4px;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        color: #6b4d00;
+      }
+      .ka-plus-card-note-text {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.35;
+        color: #333;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function clearCardNotes() {
+    document.querySelectorAll(".ka-plus-card-note").forEach((el) => el.remove());
+    document.querySelectorAll("article.ka-plus-card-note-host").forEach((card) => {
+      card.classList.remove("ka-plus-card-note-host");
+    });
+  }
+
+  function findCardNoteInsertionTarget(card) {
+    return card;
+  }
+
+  function renderNotesOnListingCards() {
+    if (!isSearchPage() && !isWatchlistPage()) return;
+    const settings = loadSettings();
+    const notesVisible = settings.adDetailExtrasEnabled !== false && settings.notesEnabled !== false;
+    if (!notesVisible) {
+      clearCardNotes();
+      return;
+    }
+
+    ensureCardNotesStylesheet();
+    const cards = Array.from(document.querySelectorAll("article")).filter((card) =>
+      card.querySelector('a[href*="/s-anzeige/"]')
+    );
+
+    cards.forEach((card) => {
+      const link = card.querySelector('a[href*="/s-anzeige/"]');
+      const adId = parseAdIdFromHref(link?.getAttribute("href") || "");
+      const note = loadNoteForAd(adId || "").trim();
+      const existing = card.querySelector(".ka-plus-card-note");
+
+      if (!note) {
+        if (existing) existing.remove();
+        card.classList.remove("ka-plus-card-note-host");
+        return;
+      }
+
+      let root = existing;
+      if (!root) {
+        root = document.createElement("div");
+        root.className = "ka-plus-card-note";
+        root.innerHTML = `
+          <p class="ka-plus-card-note-title">MEINE NOTIZ</p>
+          <p class="ka-plus-card-note-text"></p>
+        `;
+        const target = findCardNoteInsertionTarget(card);
+        target.appendChild(root);
+      }
+
+      const textEl = root.querySelector(".ka-plus-card-note-text");
+      if (textEl) textEl.textContent = note;
+      card.classList.add("ka-plus-card-note-host");
+    });
+  }
+
   function enhanceSearchCards() {
     if (!isSearchPage()) return;
     if (loadSettings().lupeEnabled === false) return;
@@ -1891,12 +2001,14 @@
     clearTimeout(kaPlusRefreshTimer);
     kaPlusRefreshTimer = window.setTimeout(() => {
       injectAdNotesAndPdf();
+      renderNotesOnListingCards();
       syncLupeUi();
     }, 120);
   }
 
   function applyUiSettingsNow() {
     injectAdNotesAndPdf(true);
+    renderNotesOnListingCards();
     syncLupeUi();
     applyHideTopAdsStyle();
   }
