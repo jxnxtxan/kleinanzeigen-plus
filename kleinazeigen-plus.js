@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.57
+// @version      1.2.60
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -2062,20 +2062,116 @@
     enhanceSearchCards();
   }
 
+  const TOP_BADGE_PURPLE = "#5A33AE";
+
+  function isKaPlusTopBadgeSvg(svg) {
+    if (!svg || svg.localName !== "svg") return false;
+    const w = svg.getAttribute("width");
+    const h = svg.getAttribute("height");
+    const cls = svg.getAttribute("class") || "";
+    const sizeMatch = w === "33" && h === "16";
+    const posMatch = cls.includes("top-none") && cls.includes("right-none");
+    if (!sizeMatch && !posMatch) return false;
+    return Array.from(svg.querySelectorAll("path[fill]")).some((path) => {
+      const fill = String(path.getAttribute("fill") || "").toUpperCase();
+      return fill === TOP_BADGE_PURPLE;
+    });
+  }
+
+  function collectTopAdListItems() {
+    const items = new Set();
+    const root =
+      document.getElementById("srchrslt-adtable") ||
+      document.getElementById("srchrslt-results");
+    if (!root) return [];
+
+    root
+      .querySelectorAll("li.ad-listitem.is-topad, li.ad-listitem.badge-topad")
+      .forEach((li) => items.add(li));
+
+    root.querySelectorAll("li.ad-listitem svg").forEach((svg) => {
+      if (!isKaPlusTopBadgeSvg(svg)) return;
+      const li = svg.closest("li.ad-listitem");
+      if (li) items.add(li);
+    });
+
+    return [...items];
+  }
+
+  function hideTopAdListItem(li) {
+    li.setAttribute("data-ka-plus-top-hidden", "1");
+    li.setAttribute("hidden", "");
+    li.style.setProperty("display", "none", "important");
+    li.style.setProperty("visibility", "hidden", "important");
+    li.style.setProperty("height", "0", "important");
+    li.style.setProperty("min-height", "0", "important");
+    li.style.setProperty("margin", "0", "important");
+    li.style.setProperty("padding", "0", "important");
+    li.style.setProperty("overflow", "hidden", "important");
+    li.style.setProperty("border", "0", "important");
+  }
+
+  function showTopAdListItem(li) {
+    li.removeAttribute("data-ka-plus-top-hidden");
+    li.removeAttribute("hidden");
+    li.style.removeProperty("display");
+    li.style.removeProperty("visibility");
+    li.style.removeProperty("height");
+    li.style.removeProperty("min-height");
+    li.style.removeProperty("margin");
+    li.style.removeProperty("padding");
+    li.style.removeProperty("overflow");
+    li.style.removeProperty("border");
+  }
+
   function ensureHideTopAdsStylesheet() {
-    if (document.getElementById("ka-plus-hide-top-ads-style")) return;
-    const el = document.createElement("style");
-    el.id = "ka-plus-hide-top-ads-style";
-    el.textContent =
-      "html.ka-plus-hide-top-ads #srchrslt-adtable li.is-topad," +
-      "html.ka-plus-hide-top-ads li.ad-listitem.is-topad { display: none !important; }";
-    document.documentElement.appendChild(el);
+    const css =
+      "html.ka-plus-hide-top-ads #srchrslt-results li.ad-listitem[data-ka-plus-top-hidden]," +
+      "html.ka-plus-hide-top-ads li[data-ka-plus-top-hidden] { display: none !important; visibility: hidden !important; height: 0 !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; border: 0 !important; }";
+    let el = document.getElementById("ka-plus-hide-top-ads-style");
+    if (!el) {
+      el = document.createElement("style");
+      el.id = "ka-plus-hide-top-ads-style";
+      (document.head || document.documentElement).appendChild(el);
+    }
+    el.textContent = css;
+  }
+
+  function clearTopAdDomHideMarkers() {
+    document.querySelectorAll("li[data-ka-plus-top-hidden]").forEach(showTopAdListItem);
+  }
+
+  function syncTopAdDomHide() {
+    const on = loadSettings().hideTopAdsEnabled === true;
+    if (!on) {
+      clearTopAdDomHideMarkers();
+      return;
+    }
+    collectTopAdListItems().forEach(hideTopAdListItem);
+  }
+
+  let topAdObserver = null;
+  let topAdObserverRoot = null;
+
+  function ensureTopAdObserver() {
+    const root = document.getElementById("srchrslt-results");
+    if (!root) return;
+    if (topAdObserver && topAdObserverRoot === root) return;
+    topAdObserver?.disconnect();
+    topAdObserverRoot = root;
+    topAdObserver = new MutationObserver(() => {
+      if (loadSettings().hideTopAdsEnabled !== true) return;
+      syncTopAdDomHide();
+    });
+    topAdObserver.observe(root, { childList: true, subtree: true });
   }
 
   function applyHideTopAdsStyle() {
     ensureHideTopAdsStylesheet();
     const on = loadSettings().hideTopAdsEnabled === true;
     document.documentElement.classList.toggle("ka-plus-hide-top-ads", on);
+    ensureTopAdObserver();
+    syncTopAdDomHide();
   }
 
   function scheduleKaPlusRefresh() {
@@ -2084,6 +2180,7 @@
       injectAdNotesAndPdf();
       renderNotesOnListingCards();
       syncLupeUi();
+      applyHideTopAdsStyle();
     }, 120);
   }
 
