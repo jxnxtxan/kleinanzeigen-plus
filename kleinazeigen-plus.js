@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.60
+// @version      1.2.69
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -20,12 +20,18 @@
 
   const STORAGE_KEY = "kaEnhancedSettings";
   const NOTES_STORAGE_KEY = "kaPlusNotesV1";
+  const WATCHLIST_PRICES_STORAGE_KEY = "kaPlusWatchlistPricesV1";
   const DEFAULT_SETTINGS = {
     autoSortEnabled: true,
     preferredSort: "Niedrigster Preis",
     adDetailExtrasEnabled: true,
     notesEnabled: true,
     watchlistNotesEnabled: true,
+    watchlistPriceSaveEnabled: true,
+    watchlistPriceShowEnabled: true,
+    watchlistPriceDeleteOnRemove: false,
+    watchlistPriceReAddMode: "append",
+    watchlistPriceReAddPrompt: true,
     lupeEnabled: true,
     pdfEnabled: true,
     hideTopAdsEnabled: false,
@@ -120,6 +126,78 @@
     saveNotesMap(map);
   }
 
+  function loadPriceMap() {
+    try {
+      const raw = localStorage.getItem(WATCHLIST_PRICES_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function savePriceMap(map) {
+    localStorage.setItem(WATCHLIST_PRICES_STORAGE_KEY, JSON.stringify(map));
+  }
+
+  function normalizePriceData(raw) {
+    if (!raw || typeof raw !== "object") return { entries: [] };
+    if (Array.isArray(raw.entries)) {
+      const entries = raw.entries
+        .filter((e) => e && typeof e.priceCents === "number" && e.savedAt)
+        .map((e) => ({
+          priceCents: e.priceCents,
+          priceText: String(e.priceText || ""),
+          savedAt: String(e.savedAt),
+        }));
+      return { entries };
+    }
+    return { entries: [] };
+  }
+
+  function loadPriceDataForAd(adId) {
+    if (!adId) return { entries: [] };
+    const map = loadPriceMap();
+    return normalizePriceData(map[adId]);
+  }
+
+  function getLatestPriceEntry(data) {
+    const entries = data?.entries;
+    if (!Array.isArray(entries) || !entries.length) return null;
+    return entries[entries.length - 1];
+  }
+
+  function getFirstPriceEntry(data) {
+    const entries = data?.entries;
+    if (!Array.isArray(entries) || !entries.length) return null;
+    return entries[0];
+  }
+
+  function persistPriceEntriesForAd(adId, entries) {
+    if (!adId) return;
+    const map = loadPriceMap();
+    if (entries?.length) map[adId] = { entries };
+    else delete map[adId];
+    savePriceMap(map);
+  }
+
+  function clearPriceForAd(adId) {
+    persistPriceEntriesForAd(adId, []);
+  }
+
+  function appendPriceEntryForAd(adId, entry) {
+    if (!adId || !entry) return;
+    const data = loadPriceDataForAd(adId);
+    data.entries.push(entry);
+    persistPriceEntriesForAd(adId, data.entries);
+  }
+
+  function overwritePriceEntryForAd(adId, entry) {
+    if (!adId || !entry) return;
+    persistPriceEntriesForAd(adId, [entry]);
+  }
+
   function loadSettings() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -134,6 +212,12 @@
         adDetailExtrasEnabled: parsed.adDetailExtrasEnabled !== false,
         notesEnabled: parsed.notesEnabled !== false,
         watchlistNotesEnabled: parsed.watchlistNotesEnabled !== false,
+        watchlistPriceSaveEnabled: parsed.watchlistPriceSaveEnabled !== false,
+        watchlistPriceShowEnabled: parsed.watchlistPriceShowEnabled !== false,
+        watchlistPriceDeleteOnRemove: parsed.watchlistPriceDeleteOnRemove === true,
+        watchlistPriceReAddMode:
+          parsed.watchlistPriceReAddMode === "overwrite" ? "overwrite" : "append",
+        watchlistPriceReAddPrompt: parsed.watchlistPriceReAddPrompt !== false,
         lupeEnabled: parsed.lupeEnabled !== false,
         pdfEnabled: parsed.pdfEnabled !== false,
         hideTopAdsEnabled: parsed.hideTopAdsEnabled === true,
@@ -377,11 +461,305 @@
   }
 
   function getAdPriceText() {
-    return (
-      textOr("#viewad-price") ||
-      textOr('[itemprop="price"]') ||
-      textOr("#viewad-main h2") ||
-      ""
+    const el =
+      document.querySelector("#viewad-price") ||
+      document.querySelector('[itemprop="price"]') ||
+      document.querySelector("#viewad-main h2");
+    if (el) return getCurrentPriceTextFromElement(el);
+    return "";
+  }
+
+  const NON_NUMERIC_PRICE_RE =
+    /\b(vb|verhandlungsbasis|zu verschenken|tausch|diverses|preis\s*auf\s*anfrage)\b/i;
+  const EURO_PRICE_PATTERN =
+    /(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:€|eur)/gi;
+  const WATCHLIST_NOTE_COLLAPSED_HEIGHT_PX = 72;
+  const WATCHLIST_NOTE_EXPANDED_HEIGHT_PX = 120;
+
+  function isStruckPriceElement(el) {
+    if (!(el instanceof Element)) return false;
+    const tag = el.tagName;
+    if (tag === "S" || tag === "DEL" || tag === "STRIKE") return true;
+    const cls = String(el.className || "").toLowerCase();
+    if (/\b(old|strike|struck|crossed|previous|strikethrough|reduced|uvp)\b/.test(cls)) {
+      return true;
+    }
+    if (el.getAttribute("aria-hidden") === "true") return true;
+    try {
+      const deco = window.getComputedStyle(el).textDecorationLine || "";
+      if (deco.includes("line-through")) return true;
+    } catch {
+      /* ignore */
+    }
+    return false;
+  }
+
+  function getCurrentPriceTextFromElement(el) {
+    if (!el) return "";
+    const chunks = [];
+    const walk = (node) => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        if (isStruckPriceElement(node)) return;
+        for (const child of node.childNodes) walk(child);
+        return;
+      }
+      if (node.nodeType === Node.TEXT_NODE) {
+        const t = String(node.textContent || "").replace(/\s+/g, " ").trim();
+        if (t) chunks.push(t);
+      }
+    };
+    walk(el);
+    const combined = chunks.join(" ").replace(/\s+/g, " ").trim();
+    if (combined) return combined;
+    return el.innerText?.replace(/\s+/g, " ").trim() || "";
+  }
+
+  function parseEuroPrice(text) {
+    const raw = String(text || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!raw || NON_NUMERIC_PRICE_RE.test(raw)) return null;
+    const matches = [...raw.matchAll(EURO_PRICE_PATTERN)];
+    if (!matches.length) return null;
+    const m = matches[matches.length - 1];
+    const numPart = m[1].replace(/\./g, "").replace(",", ".");
+    const value = Number.parseFloat(numPart);
+    if (!Number.isFinite(value) || value < 0) return null;
+    const priceCents = Math.round(value * 100);
+    return { priceCents, priceText: formatEuroFromCents(priceCents) };
+  }
+
+  function formatEuroFromCents(cents) {
+    if (typeof cents !== "number" || !Number.isFinite(cents)) return "";
+    return `${(cents / 100).toLocaleString("de-DE", { minimumFractionDigits: 0, maximumFractionDigits: 2 })} €`;
+  }
+
+  function formatPriceSavedAt(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString("de-DE", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  function buildPriceDeltaLabel(savedCents, currentCents) {
+    if (typeof savedCents !== "number" || typeof currentCents !== "number") return null;
+    const diff = currentCents - savedCents;
+    if (diff === 0) return { text: "unverändert", tone: "neutral" };
+    const abs = formatEuroFromCents(Math.abs(diff));
+    if (diff < 0) return { text: `−${abs}`, tone: "down" };
+    return { text: `+${abs}`, tone: "up" };
+  }
+
+  function isWatchlistAddAction(el) {
+    const t = normalizeActionLabelText(el);
+    return t.includes("Zur Merkliste") || t.includes("Merkliste hinzufügen");
+  }
+
+  function isWatchlistRemoveAction(el) {
+    const t = normalizeActionLabelText(el);
+    return t.includes("Von Merkliste") || t.includes("Merkliste entfernen");
+  }
+
+  function getPriceTextFromListingCard(card) {
+    if (!card) return "";
+    const selectors = [
+      '[itemprop="price"]',
+      '[class*="price"]',
+      '[class*="Price"]',
+      '[data-testid*="price"]',
+      "p.aditem-main--middle--price-shipping--price",
+      ".aditem-main--middle--price",
+    ];
+    for (const sel of selectors) {
+      const el = card.querySelector(sel);
+      const t = getCurrentPriceTextFromElement(el);
+      if (t && /€|eur/i.test(t)) return t;
+    }
+    const textNodes = Array.from(card.querySelectorAll("span, p, div, strong")).filter(
+      (el) => !isStruckPriceElement(el)
+    );
+    for (const el of textNodes) {
+      const t = getCurrentPriceTextFromElement(el);
+      if (t && /^\d/.test(t) && /€|eur/i.test(t)) return t;
+    }
+    return "";
+  }
+
+  function resolveWatchlistContextFromClick(el) {
+    if (isDetailPage()) {
+      const adId = parseAdIdFromLocation();
+      return adId ? { adId, priceText: getAdPriceText() } : null;
+    }
+    const link =
+      el.closest('a[href*="/s-anzeige/"]') ||
+      el.closest("article, li")?.querySelector('a[href*="/s-anzeige/"]') ||
+      null;
+    const cardRoot = link ? findListingCardRoot(link) : el.closest("article, li");
+    const cardLink =
+      link || cardRoot?.querySelector('a[href*="/s-anzeige/"]') || null;
+    const adId = parseAdIdFromHref(cardLink?.getAttribute("href") || "");
+    if (!adId) return null;
+    return { adId, priceText: getPriceTextFromListingCard(cardRoot || cardLink?.closest("article, li")) };
+  }
+
+  function createPriceEntry(parsed) {
+    return {
+      priceCents: parsed.priceCents,
+      priceText: parsed.priceText,
+      savedAt: new Date().toISOString(),
+    };
+  }
+
+  function showWatchlistPriceConflictDialog(currentText) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.id = "ka-plus-price-conflict-dialog";
+      overlay.innerHTML = `
+        <style>
+          #ka-plus-price-conflict-dialog {
+            position: fixed;
+            inset: 0;
+            z-index: 2147483646;
+            background: rgba(0,0,0,0.45);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            box-sizing: border-box;
+          }
+          #ka-plus-price-conflict-dialog .ka-plus-price-conflict-box {
+            background: #fff;
+            border-radius: 12px;
+            padding: 16px;
+            max-width: 360px;
+            width: 100%;
+            font-family: Arial, Helvetica, sans-serif;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+          }
+          #ka-plus-price-conflict-dialog h3 {
+            margin: 0 0 8px;
+            font-size: 16px;
+          }
+          #ka-plus-price-conflict-dialog p {
+            margin: 0 0 12px;
+            font-size: 13px;
+            line-height: 1.4;
+            color: #333;
+          }
+          #ka-plus-price-conflict-dialog .ka-plus-price-conflict-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+          }
+          #ka-plus-price-conflict-dialog button {
+            border: none;
+            border-radius: 999px;
+            padding: 10px 12px;
+            font-weight: 600;
+            cursor: pointer;
+          }
+          #ka-plus-price-conflict-dialog .ka-plus-price-conflict-append {
+            background: #ffc107;
+            color: #111;
+          }
+          #ka-plus-price-conflict-dialog .ka-plus-price-conflict-overwrite {
+            background: #e8e8e8;
+            color: #111;
+          }
+          #ka-plus-price-conflict-dialog .ka-plus-price-conflict-cancel {
+            background: transparent;
+            color: #666;
+          }
+        </style>
+        <div class="ka-plus-price-conflict-box" role="dialog" aria-modal="true" aria-labelledby="ka-plus-price-conflict-title">
+          <h3 id="ka-plus-price-conflict-title">Preis bereits gespeichert</h3>
+          <p>Es existiert bereits ein gemerkter Preis, der vom aktuellen Preis (${escapeHtml(currentText)}) abweicht. Wie soll gespeichert werden?</p>
+          <div class="ka-plus-price-conflict-actions">
+            <button type="button" class="ka-plus-price-conflict-append">Verlauf anhängen</button>
+            <button type="button" class="ka-plus-price-conflict-overwrite">Überschreiben</button>
+            <button type="button" class="ka-plus-price-conflict-cancel">Abbrechen</button>
+          </div>
+        </div>
+      `;
+      const close = (result) => {
+        overlay.remove();
+        resolve(result);
+      };
+      overlay.querySelector(".ka-plus-price-conflict-append")?.addEventListener("click", () => close("append"));
+      overlay.querySelector(".ka-plus-price-conflict-overwrite")?.addEventListener("click", () => close("overwrite"));
+      overlay.querySelector(".ka-plus-price-conflict-cancel")?.addEventListener("click", () => close("cancel"));
+      overlay.addEventListener("click", (ev) => {
+        if (ev.target === overlay) close("cancel");
+      });
+      document.body.appendChild(overlay);
+    });
+  }
+
+  async function saveWatchlistPriceForAd(adId, priceText) {
+    const parsed = parseEuroPrice(priceText);
+    if (!parsed) return false;
+    const settings = loadSettings();
+    const existing = loadPriceDataForAd(adId);
+    const latest = getLatestPriceEntry(existing);
+    const entry = createPriceEntry(parsed);
+
+    if (latest && latest.priceCents === parsed.priceCents) return true;
+
+    if (latest && latest.priceCents !== parsed.priceCents) {
+      let mode = settings.watchlistPriceReAddMode === "overwrite" ? "overwrite" : "append";
+      if (settings.watchlistPriceReAddPrompt !== false) {
+        const choice = await showWatchlistPriceConflictDialog(parsed.priceText);
+        if (choice === "cancel") return false;
+        if (choice === "append" || choice === "overwrite") mode = choice;
+      }
+      if (mode === "overwrite") overwritePriceEntryForAd(adId, entry);
+      else appendPriceEntryForAd(adId, entry);
+      return true;
+    }
+
+    appendPriceEntryForAd(adId, entry);
+    return true;
+  }
+
+  function handleWatchlistPriceClick(el) {
+    const settings = loadSettings();
+    const context = resolveWatchlistContextFromClick(el);
+    if (!context?.adId) return;
+
+    if (isWatchlistRemoveAction(el)) {
+      if (settings.watchlistPriceDeleteOnRemove === true) {
+        clearPriceForAd(context.adId);
+        scheduleKaPlusRefresh();
+      }
+      return;
+    }
+
+    if (!isWatchlistAddAction(el)) return;
+    if (settings.watchlistPriceSaveEnabled === false) return;
+
+    saveWatchlistPriceForAd(context.adId, context.priceText).then((saved) => {
+      if (saved) scheduleKaPlusRefresh();
+    });
+  }
+
+  function setupWatchlistPriceCapture() {
+    if (document.documentElement.dataset.kaPlusWatchlistPriceCapture === "1") return;
+    document.documentElement.dataset.kaPlusWatchlistPriceCapture = "1";
+    document.addEventListener(
+      "click",
+      (ev) => {
+        const target = ev.target instanceof Element ? ev.target : null;
+        if (!target) return;
+        const actionEl = target.closest("button, a");
+        if (!actionEl || !isWatchlistActionElement(actionEl)) return;
+        handleWatchlistPriceClick(actionEl);
+      },
+      true
     );
   }
 
@@ -1371,6 +1749,40 @@
       });
   }
 
+  function getAdDetailToolsLayoutKey(settings, adId) {
+    const extrasOn = settings.adDetailExtrasEnabled !== false;
+    return [
+      adId,
+      extrasOn && settings.notesEnabled !== false ? "n" : "",
+      extrasOn && settings.pdfEnabled !== false ? "p" : "",
+    ].join(":");
+  }
+
+  function isUserEditingKaPlusNotes() {
+    const active = document.activeElement;
+    return Boolean(active?.closest("#ka-plus-ad-tools"));
+  }
+
+  function syncDetailWatchlistPriceBlock(root, adId) {
+    if (!root) return;
+    const footer = root.querySelector(".ka-plus-notes-footer");
+    const existingBlock = root.querySelector("#ka-plus-watchlist-price-block");
+    const html = buildDetailWatchlistPriceHtml(adId);
+    if (html) {
+      if (existingBlock) {
+        if (existingBlock.outerHTML === html.trim()) return;
+        const wrap = document.createElement("div");
+        wrap.innerHTML = html.trim();
+        const nextBlock = wrap.firstElementChild;
+        if (nextBlock) existingBlock.replaceWith(nextBlock);
+      } else if (footer) {
+        footer.insertAdjacentHTML("beforebegin", html);
+      }
+      return;
+    }
+    existingBlock?.remove();
+  }
+
   function injectAdNotesAndPdf(forceRender = false) {
     if (!isDetailPage()) {
       const stale = document.getElementById("ka-plus-ad-tools");
@@ -1384,7 +1796,10 @@
     const extrasOn = settings.adDetailExtrasEnabled !== false;
     const notesEnabled = extrasOn && settings.notesEnabled !== false;
     const pdfEnabled = extrasOn && settings.pdfEnabled !== false;
-    const anyAdDetailTool = notesEnabled || pdfEnabled;
+    const priceBlockHtml = buildDetailWatchlistPriceHtml(adId);
+    const priceBlockEnabled = Boolean(priceBlockHtml);
+    const anyAdDetailTool = notesEnabled || pdfEnabled || priceBlockEnabled;
+    const layoutKey = getAdDetailToolsLayoutKey(settings, adId);
 
     const existing = document.getElementById("ka-plus-ad-tools");
     if (existing) {
@@ -1392,7 +1807,18 @@
         existing.remove();
         return;
       }
-      if (existing.dataset.kaPlusAdId === adId && !forceRender) return;
+      const sameAd = existing.dataset.kaPlusAdId === adId;
+      const sameLayout =
+        Boolean(existing.dataset.kaPlusLayoutKey) && existing.dataset.kaPlusLayoutKey === layoutKey;
+      if (sameAd && sameLayout) {
+        if (!isUserEditingKaPlusNotes()) {
+          syncDetailWatchlistPriceBlock(existing, adId);
+        }
+        return;
+      }
+      if (sameAd && isUserEditingKaPlusNotes()) {
+        return;
+      }
       existing.remove();
     }
 
@@ -1405,6 +1831,7 @@
     root.id = "ka-plus-ad-tools";
     root.dataset.kaPlusInjected = "1";
     root.dataset.kaPlusAdId = adId;
+    root.dataset.kaPlusLayoutKey = layoutKey;
     const saved = loadNoteForAd(adId);
 
     root.innerHTML = `
@@ -1497,6 +1924,48 @@
           color: #888;
           text-align: center;
         }
+        #ka-plus-ad-tools .ka-plus-watchlist-price-block {
+          margin-top: 12px;
+          padding-top: 12px;
+          border-top: 1px solid #eee;
+        }
+        #ka-plus-ad-tools .ka-plus-watchlist-price-history {
+          list-style: none;
+          margin: 0;
+          padding: 0;
+        }
+        #ka-plus-ad-tools .ka-plus-watchlist-price-history li {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          align-items: baseline;
+          margin: 0 0 6px;
+          font-size: 13px;
+        }
+        #ka-plus-ad-tools .ka-plus-watchlist-price-when {
+          font-size: 12px;
+          color: #666;
+        }
+        #ka-plus-ad-tools .ka-plus-watchlist-price-latest {
+          font-size: 11px;
+          font-weight: 700;
+          color: #0b3d6e;
+          letter-spacing: 0.03em;
+        }
+        #ka-plus-ad-tools .ka-plus-watchlist-price-compare {
+          margin: 8px 0 0;
+          font-size: 13px;
+          font-weight: 700;
+        }
+        #ka-plus-ad-tools .ka-plus-watchlist-price-compare.is-down {
+          color: #1b7a3a;
+        }
+        #ka-plus-ad-tools .ka-plus-watchlist-price-compare.is-up {
+          color: #b42318;
+        }
+        #ka-plus-ad-tools .ka-plus-watchlist-price-compare.is-neutral {
+          color: #555;
+        }
       </style>
       ${
         notesEnabled
@@ -1511,6 +1980,7 @@
           : ""
       }
       ${pdfEnabled ? `<button type="button" class="ka-plus-btn-pdf" id="ka-plus-pdf-btn">Als PDF speichern</button>` : ""}
+      ${priceBlockHtml}
       <p class="ka-plus-notes-footer">Kleinanzeigen Plus</p>
     `;
 
@@ -1798,39 +2268,102 @@
     return img || null;
   }
 
-  function ensureCardNotesStylesheet() {
-    if (document.getElementById("ka-plus-card-note-style")) return;
-    const style = document.createElement("style");
-    style.id = "ka-plus-card-note-style";
+  function ensureWatchlistCardExtrasStylesheet() {
+    const styleId = "ka-plus-watchlist-extras-style-v4";
+    let style = document.getElementById(styleId);
+    if (!style) {
+      document.getElementById("ka-plus-watchlist-extras-style")?.remove();
+      document.getElementById("ka-plus-watchlist-extras-style-v2")?.remove();
+      document.getElementById("ka-plus-watchlist-extras-style-v3")?.remove();
+      style = document.createElement("style");
+      style.id = styleId;
+      document.documentElement.appendChild(style);
+    }
     style.textContent = `
+      .ka-plus-watchlist-card-wrap {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .ka-plus-watchlist-card-wrap > .ka-plus-watchlist-extras {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 10px;
+        width: 100%;
+        margin: 0;
+        padding: 8px 14px 10px;
+        border-top: 1px solid #e8e8e8;
+        background: #fafafa;
+        box-sizing: border-box;
+      }
+      .ka-plus-watchlist-extras > .ka-plus-price-badge,
+      .ka-plus-watchlist-extras > .ka-plus-card-note {
+        flex: 1 1 calc(50% - 5px);
+        min-width: 0;
+        box-sizing: border-box;
+      }
+      .ka-plus-watchlist-extras > :only-child {
+        flex: 1 1 100%;
+        min-width: 100%;
+        max-width: 100%;
+      }
+      .ka-plus-price-badge {
+        position: static;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        padding: 8px 10px;
+        border: 1px solid #9ec5fe;
+        border-radius: 6px;
+        background: #eef5ff;
+        box-sizing: border-box;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 12px;
+        line-height: 1.35;
+        color: #0b3d6e;
+        pointer-events: none;
+      }
+      .ka-plus-price-badge-title {
+        margin: 0 0 2px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+      .ka-plus-price-badge-line {
+        margin: 0;
+      }
+      .ka-plus-price-badge-line.is-down {
+        color: #1b7a3a;
+        font-weight: 700;
+      }
+      .ka-plus-price-badge-line.is-up {
+        color: #b42318;
+        font-weight: 700;
+      }
+      .ka-plus-price-badge-line.is-neutral {
+        color: #555;
+      }
+      .ka-plus-price-badge-origin {
+        margin: 2px 0 0;
+        font-size: 11px;
+        color: #4a6785;
+      }
       .ka-plus-card-note {
         margin: 0;
-        padding: 8px 10px 24px;
+        padding: 8px 10px 22px;
         border: 1px solid #ffe08a;
         border-radius: 6px;
         background: #fffaf0;
-        width: 380px;
-        max-width: 100%;
-        height: 98px;
+        height: 72px;
         box-sizing: border-box;
         display: flex;
         flex-direction: column;
         position: relative;
       }
-      article.ka-plus-card-note-host {
-        position: relative;
-      }
-      article.ka-plus-card-note-host .ka-plus-card-note {
-        position: absolute;
-        bottom: 14px;
-        right: 14px;
-        z-index: 2;
-      }
-      article.ka-plus-card-note-host.ka-plus-card-note-expanded {
-        padding-bottom: 86px;
-      }
-      article.ka-plus-card-note-host .ka-plus-card-note.is-expanded {
-        height: 164px;
+      .ka-plus-card-note.is-expanded {
+        height: 120px;
       }
       .ka-plus-card-note-title {
         margin: 0 0 4px;
@@ -1878,19 +2411,137 @@
         display: none !important;
       }
     `;
-    document.documentElement.appendChild(style);
+  }
+
+  function syncWatchlistNoteHeightToPrice(extras) {
+    if (!extras?.classList.contains("ka-plus-watchlist-extras")) return;
+    const badge = extras.querySelector(":scope > .ka-plus-price-badge");
+    const note = extras.querySelector(":scope > .ka-plus-card-note");
+    if (!note) return;
+    if (note.classList.contains("is-expanded")) {
+      note.style.height = `${WATCHLIST_NOTE_EXPANDED_HEIGHT_PX}px`;
+      note.style.minHeight = "";
+      return;
+    }
+    if (!badge) {
+      note.style.height = "auto";
+      note.style.minHeight = `${WATCHLIST_NOTE_COLLAPSED_HEIGHT_PX}px`;
+      return;
+    }
+    note.style.minHeight = "";
+    note.style.height = `${badge.offsetHeight}px`;
+  }
+
+  function syncAllWatchlistNoteHeights() {
+    document.querySelectorAll(".ka-plus-watchlist-extras").forEach((extras) => {
+      syncWatchlistNoteHeightToPrice(extras);
+      const note = extras.querySelector(":scope > .ka-plus-card-note");
+      if (note) updateCardNoteOverflowUi(note);
+    });
+  }
+
+  function getWatchlistCardWrap(card) {
+    if (!card) return null;
+    const parent = card.parentElement;
+    return parent?.classList.contains("ka-plus-watchlist-card-wrap") ? parent : null;
+  }
+
+  function ensureWatchlistCardWrapper(card) {
+    if (!card) return null;
+    const existingWrap = getWatchlistCardWrap(card);
+    if (existingWrap) return existingWrap;
+    const wrap = document.createElement("div");
+    wrap.className = "ka-plus-watchlist-card-wrap";
+    card.insertAdjacentElement("beforebegin", wrap);
+    wrap.appendChild(card);
+    return wrap;
+  }
+
+  function migrateLegacyWatchlistExtras(card) {
+    const legacy = card.querySelector(":scope > .ka-plus-watchlist-extras");
+    if (!legacy) return;
+    const wrap = ensureWatchlistCardWrapper(card);
+    let extras = wrap.querySelector(":scope > .ka-plus-watchlist-extras");
+    if (!extras) {
+      extras = document.createElement("div");
+      extras.className = "ka-plus-watchlist-extras";
+      wrap.appendChild(extras);
+    }
+    while (legacy.firstChild) extras.appendChild(legacy.firstChild);
+    legacy.remove();
+    card.classList.remove("ka-plus-watchlist-extras-host");
+  }
+
+  function unwrapWatchlistCardIfBare(card) {
+    const wrap = getWatchlistCardWrap(card);
+    if (!wrap) return;
+    const extras = wrap.querySelector(":scope > .ka-plus-watchlist-extras");
+    if (extras?.children.length) return;
+    extras?.remove();
+    if (wrap.parentElement) {
+      wrap.parentElement.insertBefore(card, wrap);
+      wrap.remove();
+    }
+  }
+
+  function getWatchlistCardExtrasContainer(card, create = true) {
+    if (!card) return null;
+    migrateLegacyWatchlistExtras(card);
+    const wrap = create ? ensureWatchlistCardWrapper(card) : getWatchlistCardWrap(card);
+    if (!wrap) return null;
+    let extras = wrap.querySelector(":scope > .ka-plus-watchlist-extras");
+    if (!extras && create) {
+      extras = document.createElement("div");
+      extras.className = "ka-plus-watchlist-extras";
+      wrap.appendChild(extras);
+    }
+    return extras;
+  }
+
+  function findWatchlistPriceBadge(card) {
+    const wrap = getWatchlistCardWrap(card);
+    if (wrap) {
+      return wrap.querySelector(":scope > .ka-plus-watchlist-extras > .ka-plus-price-badge");
+    }
+    return card.querySelector(".ka-plus-price-badge");
+  }
+
+  function findWatchlistCardNote(card) {
+    const wrap = getWatchlistCardWrap(card);
+    if (wrap) {
+      return wrap.querySelector(":scope > .ka-plus-watchlist-extras > .ka-plus-card-note");
+    }
+    return card.querySelector(".ka-plus-card-note");
+  }
+
+  function removeWatchlistCardExtrasContainerIfEmpty(card) {
+    if (!card) return;
+    migrateLegacyWatchlistExtras(card);
+    const wrap = getWatchlistCardWrap(card);
+    if (!wrap) {
+      card.classList.remove("ka-plus-watchlist-extras-host");
+      return;
+    }
+    const extras = wrap.querySelector(":scope > .ka-plus-watchlist-extras");
+    if (extras && !extras.children.length) extras.remove();
+    unwrapWatchlistCardIfBare(card);
+    card.classList.remove("ka-plus-watchlist-extras-host");
+  }
+
+  function ensureCardNotesStylesheet() {
+    ensureWatchlistCardExtrasStylesheet();
   }
 
   function clearCardNotes() {
-    document.querySelectorAll(".ka-plus-card-note").forEach((el) => el.remove());
+    document.querySelectorAll(".ka-plus-card-note").forEach((el) => {
+      const card = el.closest("article");
+      el.remove();
+      if (card) removeWatchlistCardExtrasContainerIfEmpty(card);
+    });
     document.querySelectorAll("article.ka-plus-card-note-host").forEach((card) => {
       card.classList.remove("ka-plus-card-note-host");
       card.classList.remove("ka-plus-card-note-expanded");
     });
-  }
-
-  function findCardNoteInsertionTarget(card) {
-    return card;
   }
 
   function updateCardNoteOverflowUi(root) {
@@ -1899,7 +2550,25 @@
     if (!textEl || !toggle) return;
 
     const wasExpanded = root.classList.contains("is-expanded");
+    const extras = root.closest(".ka-plus-watchlist-extras");
+    const hasBadge = Boolean(extras?.querySelector(":scope > .ka-plus-price-badge"));
+
     root.classList.remove("is-expanded");
+    syncWatchlistNoteHeightToPrice(extras);
+
+    if (!hasBadge) {
+      root.style.height = "auto";
+      root.style.minHeight = `${WATCHLIST_NOTE_COLLAPSED_HEIGHT_PX}px`;
+      if (root.scrollHeight <= WATCHLIST_NOTE_COLLAPSED_HEIGHT_PX + 2) {
+        toggle.hidden = true;
+        root.classList.remove("is-expanded");
+        root.closest("article")?.classList.remove("ka-plus-card-note-expanded");
+        toggle.textContent = "Mehr anzeigen";
+        return;
+      }
+      root.style.height = `${WATCHLIST_NOTE_COLLAPSED_HEIGHT_PX}px`;
+    }
+
     const hasOverflow = textEl.scrollHeight > textEl.clientHeight + 1;
 
     if (!hasOverflow) {
@@ -1913,12 +2582,130 @@
     toggle.hidden = false;
     if (wasExpanded) {
       root.classList.add("is-expanded");
+      root.style.height = `${WATCHLIST_NOTE_EXPANDED_HEIGHT_PX}px`;
       root.closest("article")?.classList.add("ka-plus-card-note-expanded");
       toggle.textContent = "Weniger anzeigen";
     } else {
       root.closest("article")?.classList.remove("ka-plus-card-note-expanded");
       toggle.textContent = "Mehr anzeigen";
     }
+  }
+
+  function clearCardPriceBadges() {
+    document.querySelectorAll(".ka-plus-price-badge").forEach((el) => {
+      const card = el.closest("article");
+      el.remove();
+      if (card) removeWatchlistCardExtrasContainerIfEmpty(card);
+    });
+    document.querySelectorAll("article.ka-plus-price-badge-host").forEach((card) => {
+      card.classList.remove("ka-plus-price-badge-host");
+    });
+  }
+
+  function ensureCardPriceBadgeStylesheet() {
+    ensureWatchlistCardExtrasStylesheet();
+  }
+
+  function buildWatchlistPriceBadgeHtml(priceData, currentPriceText) {
+    const latest = getLatestPriceEntry(priceData);
+    if (!latest) return "";
+    const savedLabel = latest.priceText || formatEuroFromCents(latest.priceCents);
+    const savedAt = formatPriceSavedAt(latest.savedAt);
+    const currentParsed = parseEuroPrice(currentPriceText);
+    let compareHtml = "";
+    if (currentParsed) {
+      const delta = buildPriceDeltaLabel(latest.priceCents, currentParsed.priceCents);
+      const toneClass =
+        delta?.tone === "down" ? "is-down" : delta?.tone === "up" ? "is-up" : "is-neutral";
+      const nowLabel = currentParsed.priceText || formatEuroFromCents(currentParsed.priceCents);
+      compareHtml = `<p class="ka-plus-price-badge-line ${toneClass}">Jetzt: ${escapeHtml(nowLabel)}${delta?.text ? ` (${escapeHtml(delta.text)})` : ""}</p>`;
+    }
+    const first = getFirstPriceEntry(priceData);
+    const originHtml =
+      priceData.entries.length > 1 && first && first.priceCents !== latest.priceCents
+        ? `<p class="ka-plus-price-badge-origin">Ursprünglich: ${escapeHtml(first.priceText || formatEuroFromCents(first.priceCents))}</p>`
+        : "";
+    return `
+      <p class="ka-plus-price-badge-title">GEMERKTER PREIS</p>
+      <p class="ka-plus-price-badge-line">${escapeHtml(savedLabel)}${savedAt ? ` · ${escapeHtml(savedAt)}` : ""}</p>
+      ${compareHtml}
+      ${originHtml}
+    `;
+  }
+
+  function renderWatchlistPriceBadges() {
+    if (!isWatchlistPage()) return;
+    const settings = loadSettings();
+    const visible =
+      settings.adDetailExtrasEnabled !== false && settings.watchlistPriceShowEnabled !== false;
+    if (!visible) {
+      clearCardPriceBadges();
+      return;
+    }
+
+    ensureCardPriceBadgeStylesheet();
+    const cards = Array.from(document.querySelectorAll("article")).filter((card) =>
+      card.querySelector('a[href*="/s-anzeige/"]')
+    );
+
+    cards.forEach((card) => {
+      const link = card.querySelector('a[href*="/s-anzeige/"]');
+      const adId = parseAdIdFromHref(link?.getAttribute("href") || "");
+      const priceData = loadPriceDataForAd(adId || "");
+      const existing = findWatchlistPriceBadge(card);
+
+      if (!priceData.entries.length) {
+        if (existing) existing.remove();
+        card.classList.remove("ka-plus-price-badge-host");
+        removeWatchlistCardExtrasContainerIfEmpty(card);
+        return;
+      }
+
+      const extras = getWatchlistCardExtrasContainer(card);
+      let badge = existing;
+      if (!badge) {
+        badge = document.createElement("div");
+        badge.className = "ka-plus-price-badge";
+      }
+      extras.prepend(badge);
+      badge.innerHTML = buildWatchlistPriceBadgeHtml(priceData, getPriceTextFromListingCard(card));
+      card.classList.add("ka-plus-price-badge-host");
+    });
+    syncAllWatchlistNoteHeights();
+  }
+
+  function buildDetailWatchlistPriceHtml(adId) {
+    const settings = loadSettings();
+    const show =
+      settings.adDetailExtrasEnabled !== false && settings.watchlistPriceShowEnabled !== false;
+    const priceData = loadPriceDataForAd(adId);
+    if (!show || !priceData.entries.length) return "";
+
+    const currentParsed = parseEuroPrice(getAdPriceText());
+    const latest = getLatestPriceEntry(priceData);
+    let compareHtml = "";
+    if (latest && currentParsed) {
+      const delta = buildPriceDeltaLabel(latest.priceCents, currentParsed.priceCents);
+      const toneClass =
+        delta?.tone === "down" ? "is-down" : delta?.tone === "up" ? "is-up" : "is-neutral";
+      compareHtml = `<p class="ka-plus-watchlist-price-compare ${toneClass}">Aktuell: ${escapeHtml(currentParsed.priceText)}${delta?.text ? ` (${escapeHtml(delta.text)})` : ""}</p>`;
+    }
+
+    const historyHtml = priceData.entries
+      .map((entry, idx) => {
+        const label = entry.priceText || formatEuroFromCents(entry.priceCents);
+        const when = formatPriceSavedAt(entry.savedAt);
+        return `<li><span>${escapeHtml(label)}</span>${when ? `<span class="ka-plus-watchlist-price-when">${escapeHtml(when)}</span>` : ""}${idx === priceData.entries.length - 1 ? `<span class="ka-plus-watchlist-price-latest">neueste</span>` : ""}</li>`;
+      })
+      .join("");
+
+    return `
+      <div class="ka-plus-watchlist-price-block" id="ka-plus-watchlist-price-block">
+        <p class="ka-plus-notes-title">MEIN MERKLISTEN-PREIS</p>
+        <ul class="ka-plus-watchlist-price-history">${historyHtml}</ul>
+        ${compareHtml}
+      </div>
+    `;
   }
 
   function renderNotesOnListingCards() {
@@ -1942,14 +2729,16 @@
       const link = card.querySelector('a[href*="/s-anzeige/"]');
       const adId = parseAdIdFromHref(link?.getAttribute("href") || "");
       const note = loadNoteForAd(adId || "").trim();
-      const existing = card.querySelector(".ka-plus-card-note");
+      const existing = findWatchlistCardNote(card);
 
       if (!note) {
         if (existing) existing.remove();
         card.classList.remove("ka-plus-card-note-host");
+        removeWatchlistCardExtrasContainerIfEmpty(card);
         return;
       }
 
+      const extras = getWatchlistCardExtrasContainer(card);
       let root = existing;
       if (!root) {
         root = document.createElement("div");
@@ -1960,20 +2749,30 @@
           <button type="button" class="ka-plus-card-note-toggle" hidden>Mehr anzeigen</button>
         `;
         root.querySelector(".ka-plus-card-note-toggle")?.addEventListener("click", () => {
-          const expanded = root.classList.toggle("is-expanded");
           const toggle = root.querySelector(".ka-plus-card-note-toggle");
-          card.classList.toggle("ka-plus-card-note-expanded", expanded);
-          if (toggle) toggle.textContent = expanded ? "Weniger anzeigen" : "Mehr anzeigen";
+          const willExpand = !root.classList.contains("is-expanded");
+          if (willExpand) {
+            root.classList.add("is-expanded");
+            card.classList.add("ka-plus-card-note-expanded");
+            root.style.height = `${WATCHLIST_NOTE_EXPANDED_HEIGHT_PX}px`;
+            if (toggle) toggle.textContent = "Weniger anzeigen";
+            return;
+          }
+          root.classList.remove("is-expanded");
+          card.classList.remove("ka-plus-card-note-expanded");
+          if (toggle) toggle.textContent = "Mehr anzeigen";
+          updateCardNoteOverflowUi(root);
         });
-        const target = findCardNoteInsertionTarget(card);
-        target.appendChild(root);
+        extras.appendChild(root);
+      } else if (root.parentElement !== extras) {
+        extras.appendChild(root);
       }
 
       const textEl = root.querySelector(".ka-plus-card-note-text");
       if (textEl) textEl.textContent = note;
-      updateCardNoteOverflowUi(root);
       card.classList.add("ka-plus-card-note-host");
     });
+    syncAllWatchlistNoteHeights();
   }
 
   function enhanceSearchCards() {
@@ -2174,11 +2973,46 @@
     syncTopAdDomHide();
   }
 
+  const KA_PLUS_UI_MUTATION_SELECTORS = [
+    "#ka-enhanced-root",
+    "#ka-plus-ad-tools",
+    "#ka-plus-lightbox",
+    "#ka-plus-price-conflict-dialog",
+    ".ka-plus-card-note",
+    ".ka-plus-price-badge",
+    ".ka-plus-watchlist-extras",
+    ".ka-plus-watchlist-card-wrap",
+    ".ka-plus-lupe-btn",
+  ];
+
+  function nodeIsInsideKaPlusUi(node) {
+    if (!(node instanceof Element)) return false;
+    return KA_PLUS_UI_MUTATION_SELECTORS.some((sel) => node.matches(sel) || node.closest(sel));
+  }
+
+  function mutationsAreOnlyKaPlusUi(records) {
+    if (!records.length) return false;
+    return records.every((record) => {
+      const nodes = [record.target, ...record.addedNodes, ...record.removedNodes];
+      return nodes.every((node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          return nodeIsInsideKaPlusUi(node.parentElement);
+        }
+        if (node.nodeType === Node.DOCUMENT_NODE || node === document.documentElement) {
+          return false;
+        }
+        if (!(node instanceof Element)) return true;
+        return nodeIsInsideKaPlusUi(node);
+      });
+    });
+  }
+
   function scheduleKaPlusRefresh() {
     clearTimeout(kaPlusRefreshTimer);
     kaPlusRefreshTimer = window.setTimeout(() => {
-      injectAdNotesAndPdf();
+      injectAdNotesAndPdf(false);
       renderNotesOnListingCards();
+      renderWatchlistPriceBadges();
       syncLupeUi();
       applyHideTopAdsStyle();
     }, 120);
@@ -2187,6 +3021,7 @@
   function applyUiSettingsNow() {
     injectAdNotesAndPdf(true);
     renderNotesOnListingCards();
+    renderWatchlistPriceBadges();
     syncLupeUi();
     applyHideTopAdsStyle();
   }
@@ -2270,7 +3105,10 @@
           position: absolute;
           top: calc(100% + 8px);
           right: 0;
-          min-width: 300px;
+          min-width: 320px;
+          max-width: min(360px, calc(100vw - 24px));
+          max-height: min(78vh, 640px);
+          overflow-y: auto;
           background: #fff;
           border: 1px solid #ddd;
           border-radius: 12px;
@@ -2281,8 +3119,26 @@
           display: block;
         }
         #ka-enhanced-panel h4 {
-          margin: 0 0 6px;
+          margin: 0 0 10px;
           font-size: 14px;
+        }
+        .ka-tools-category {
+          margin: 0 0 12px;
+          padding: 0 0 10px;
+          border-bottom: 1px solid #eee;
+        }
+        .ka-tools-category:last-child {
+          margin-bottom: 0;
+          padding-bottom: 0;
+          border-bottom: none;
+        }
+        .ka-tools-category-title {
+          margin: 0 0 6px;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          color: #666;
         }
         .ka-row {
           margin: 5px 0;
@@ -2293,7 +3149,8 @@
           gap: 8px;
           align-items: center;
         }
-        #ka-sort-select {
+        #ka-sort-select,
+        #ka-watchlist-price-readd-mode {
           width: 100%;
           padding: 6px 8px;
           border-radius: 8px;
@@ -2312,29 +3169,31 @@
           margin: 0;
           line-height: 1.35;
         }
-        #ka-sort-select:focus-visible {
+        #ka-sort-select:focus-visible,
+        #ka-watchlist-price-readd-mode:focus-visible {
           outline: 2px solid #5b39c6;
           outline-offset: 0;
           box-shadow: none;
         }
-        .ka-ad-extras-sub {
-          margin: 0 0 5px;
+        .ka-tools-sub {
+          margin: 4px 0 0;
           padding: 2px 0 2px 12px;
           border-left: 3px solid #e8e8e8;
           transition: opacity 0.15s ease;
         }
-        .ka-ad-extras-sub > .ka-row {
+        .ka-tools-sub > .ka-row {
           margin: 2px 0;
         }
-        .ka-ad-extras-sub.disabled {
+        .ka-tools-sub.disabled {
           opacity: 0.5;
           pointer-events: none;
         }
-        .ka-ad-extras-sub.disabled label {
+        .ka-tools-sub.disabled label {
           color: #888;
           cursor: not-allowed;
         }
-        .ka-ad-extras-sub input[type="checkbox"] {
+        .ka-tools-sub input[type="checkbox"],
+        .ka-tools-category > .ka-row input[type="checkbox"] {
           accent-color: #1d4b00;
         }
       </style>
@@ -2344,61 +3203,110 @@
       </button>
       <div id="ka-enhanced-panel">
         <h4>Kleinanzeigen Tools</h4>
-        <div class="ka-row">
-          <label>
-            <input id="ka-sort-enabled" type="checkbox" ${settings.autoSortEnabled ? "checked" : ""}>
-            Standard-Sortierung automatisch setzen
-          </label>
-        </div>
-        <div class="ka-row">
-          <label>
-            <input id="ka-ad-detail-extras-master" type="checkbox" ${settings.adDetailExtrasEnabled !== false ? "checked" : ""}>
-            Notizen &amp; PDF auf Anzeigenseiten
-          </label>
-        </div>
-        <div class="ka-ad-extras-sub" id="ka-ad-detail-extras-sub">
+
+        <section class="ka-tools-category" aria-labelledby="ka-cat-sort">
+          <h5 class="ka-tools-category-title" id="ka-cat-sort">Sortierung</h5>
           <div class="ka-row">
             <label>
-              <input id="ka-notes-enabled" type="checkbox" ${settings.notesEnabled !== false ? "checked" : ""}>
-              Notizenbereich auf Anzeigen anzeigen
+              <input id="ka-sort-enabled" type="checkbox" ${settings.autoSortEnabled ? "checked" : ""}>
+              Standard-Sortierung automatisch setzen
+            </label>
+          </div>
+          <div class="ka-row ka-sort-row">
+            <label for="ka-sort-select">Gewünschte Sortierung</label>
+            <select id="ka-sort-select">
+              ${VALID_SORTS.map(
+                (name) =>
+                  `<option value="${name}" ${
+                    settings.preferredSort === name ? "selected" : ""
+                  }>${name}</option>`
+              ).join("")}
+            </select>
+          </div>
+        </section>
+
+        <section class="ka-tools-category" aria-labelledby="ka-cat-detail">
+          <h5 class="ka-tools-category-title" id="ka-cat-detail">Anzeigenseiten</h5>
+          <div class="ka-row">
+            <label>
+              <input id="ka-ad-detail-extras-master" type="checkbox" ${settings.adDetailExtrasEnabled !== false ? "checked" : ""}>
+              Notizen &amp; PDF aktivieren
+            </label>
+          </div>
+          <div class="ka-tools-sub" id="ka-ad-detail-extras-sub">
+            <div class="ka-row">
+              <label>
+                <input id="ka-notes-enabled" type="checkbox" ${settings.notesEnabled !== false ? "checked" : ""}>
+                Notizenbereich anzeigen
+              </label>
+            </div>
+            <div class="ka-row">
+              <label>
+                <input id="ka-pdf-enabled" type="checkbox" ${settings.pdfEnabled !== false ? "checked" : ""}>
+                PDF speichern anzeigen
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="ka-tools-category" aria-labelledby="ka-cat-watchlist">
+          <h5 class="ka-tools-category-title" id="ka-cat-watchlist">Merkliste</h5>
+          <div class="ka-tools-sub" id="ka-merkliste-sub">
+            <div class="ka-row">
+              <label>
+                <input id="ka-watchlist-notes-enabled" type="checkbox" ${settings.watchlistNotesEnabled !== false ? "checked" : ""}>
+                Notiz in Merkliste anzeigen
+              </label>
+            </div>
+            <div class="ka-row">
+              <label>
+                <input id="ka-watchlist-price-save-enabled" type="checkbox" ${settings.watchlistPriceSaveEnabled !== false ? "checked" : ""}>
+                Preis bei Merkliste speichern
+              </label>
+            </div>
+            <div class="ka-row">
+              <label>
+                <input id="ka-watchlist-price-show-enabled" type="checkbox" ${settings.watchlistPriceShowEnabled !== false ? "checked" : ""}>
+                Gespeicherten Preis anzeigen
+              </label>
+            </div>
+            <div class="ka-row">
+              <label>
+                <input id="ka-watchlist-price-delete-on-remove" type="checkbox" ${settings.watchlistPriceDeleteOnRemove === true ? "checked" : ""}>
+                Preis beim Entfernen löschen
+              </label>
+            </div>
+            <div class="ka-row">
+              <label>
+                <input id="ka-watchlist-price-readd-prompt" type="checkbox" ${settings.watchlistPriceReAddPrompt !== false ? "checked" : ""}>
+                Bei abweichendem Preis nachfragen
+              </label>
+            </div>
+            <div class="ka-row ka-sort-row">
+              <label for="ka-watchlist-price-readd-mode">Bei erneutem Hinzufügen</label>
+              <select id="ka-watchlist-price-readd-mode">
+                <option value="append" ${settings.watchlistPriceReAddMode !== "overwrite" ? "selected" : ""}>Verlauf anhängen</option>
+                <option value="overwrite" ${settings.watchlistPriceReAddMode === "overwrite" ? "selected" : ""}>Überschreiben</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
+        <section class="ka-tools-category" aria-labelledby="ka-cat-search">
+          <h5 class="ka-tools-category-title" id="ka-cat-search">Suche</h5>
+          <div class="ka-row">
+            <label>
+              <input id="ka-lupe-enabled" type="checkbox" ${settings.lupeEnabled !== false ? "checked" : ""}>
+              Lupe auf Kartenbildern anzeigen
             </label>
           </div>
           <div class="ka-row">
             <label>
-              <input id="ka-watchlist-notes-enabled" type="checkbox" ${settings.watchlistNotesEnabled !== false ? "checked" : ""}>
-              Notiz in Merkliste anzeigen
+              <input id="ka-hide-top-ads" type="checkbox" ${settings.hideTopAdsEnabled === true ? "checked" : ""}>
+              TOP-Anzeigen ausblenden
             </label>
           </div>
-          <div class="ka-row">
-            <label>
-              <input id="ka-pdf-enabled" type="checkbox" ${settings.pdfEnabled !== false ? "checked" : ""}>
-              PDF speichern auf Anzeigen anzeigen
-            </label>
-          </div>
-        </div>
-        <div class="ka-row">
-          <label>
-            <input id="ka-lupe-enabled" type="checkbox" ${settings.lupeEnabled !== false ? "checked" : ""}>
-            Lupe in der Suche anzeigen
-          </label>
-        </div>
-        <div class="ka-row">
-          <label>
-            <input id="ka-hide-top-ads" type="checkbox" ${settings.hideTopAdsEnabled === true ? "checked" : ""}>
-            TOP-Anzeigen in Suchergebnissen ausblenden
-          </label>
-        </div>
-        <div class="ka-row ka-sort-row">
-          <label for="ka-sort-select">Gewünschte Sortierung</label>
-          <select id="ka-sort-select">
-            ${VALID_SORTS.map(
-              (name) =>
-                `<option value="${name}" ${
-                  settings.preferredSort === name ? "selected" : ""
-                }>${name}</option>`
-            ).join("")}
-          </select>
-        </div>
+        </section>
       </div>
     `;
 
@@ -2414,9 +3322,15 @@
     const enabledInput = root.querySelector("#ka-sort-enabled");
     const adDetailExtrasMasterInput = root.querySelector("#ka-ad-detail-extras-master");
     const adDetailExtrasSub = root.querySelector("#ka-ad-detail-extras-sub");
+    const merklisteSub = root.querySelector("#ka-merkliste-sub");
     const notesEnabledInput = root.querySelector("#ka-notes-enabled");
     const watchlistNotesEnabledInput = root.querySelector("#ka-watchlist-notes-enabled");
     const pdfEnabledInput = root.querySelector("#ka-pdf-enabled");
+    const watchlistPriceSaveInput = root.querySelector("#ka-watchlist-price-save-enabled");
+    const watchlistPriceShowInput = root.querySelector("#ka-watchlist-price-show-enabled");
+    const watchlistPriceDeleteInput = root.querySelector("#ka-watchlist-price-delete-on-remove");
+    const watchlistPriceReAddPromptInput = root.querySelector("#ka-watchlist-price-readd-prompt");
+    const watchlistPriceReAddModeInput = root.querySelector("#ka-watchlist-price-readd-mode");
     const lupeEnabledInput = root.querySelector("#ka-lupe-enabled");
     const hideTopAdsInput = root.querySelector("#ka-hide-top-ads");
     const selectInput = root.querySelector("#ka-sort-select");
@@ -2424,9 +3338,15 @@
     function syncAdDetailExtrasSubgroupUi() {
       const on = adDetailExtrasMasterInput?.checked ?? true;
       if (adDetailExtrasSub) adDetailExtrasSub.classList.toggle("disabled", !on);
+      if (merklisteSub) merklisteSub.classList.toggle("disabled", !on);
       if (notesEnabledInput) notesEnabledInput.disabled = !on;
       if (watchlistNotesEnabledInput) watchlistNotesEnabledInput.disabled = !on;
       if (pdfEnabledInput) pdfEnabledInput.disabled = !on;
+      if (watchlistPriceSaveInput) watchlistPriceSaveInput.disabled = !on;
+      if (watchlistPriceShowInput) watchlistPriceShowInput.disabled = !on;
+      if (watchlistPriceDeleteInput) watchlistPriceDeleteInput.disabled = !on;
+      if (watchlistPriceReAddPromptInput) watchlistPriceReAddPromptInput.disabled = !on;
+      if (watchlistPriceReAddModeInput) watchlistPriceReAddModeInput.disabled = !on;
     }
     syncAdDetailExtrasSubgroupUi();
 
@@ -2465,6 +3385,33 @@
       saveSettings(next);
       applyUiSettingsNow();
     });
+    watchlistPriceSaveInput?.addEventListener("change", () => {
+      const next = loadSettings();
+      next.watchlistPriceSaveEnabled = watchlistPriceSaveInput.checked;
+      saveSettings(next);
+    });
+    watchlistPriceShowInput?.addEventListener("change", () => {
+      const next = loadSettings();
+      next.watchlistPriceShowEnabled = watchlistPriceShowInput.checked;
+      saveSettings(next);
+      applyUiSettingsNow();
+    });
+    watchlistPriceDeleteInput?.addEventListener("change", () => {
+      const next = loadSettings();
+      next.watchlistPriceDeleteOnRemove = watchlistPriceDeleteInput.checked;
+      saveSettings(next);
+    });
+    watchlistPriceReAddPromptInput?.addEventListener("change", () => {
+      const next = loadSettings();
+      next.watchlistPriceReAddPrompt = watchlistPriceReAddPromptInput.checked;
+      saveSettings(next);
+    });
+    watchlistPriceReAddModeInput?.addEventListener("change", () => {
+      const next = loadSettings();
+      next.watchlistPriceReAddMode =
+        watchlistPriceReAddModeInput.value === "overwrite" ? "overwrite" : "append";
+      saveSettings(next);
+    });
     lupeEnabledInput.addEventListener("change", () => {
       const next = loadSettings();
       next.lupeEnabled = lupeEnabledInput.checked;
@@ -2486,7 +3433,8 @@
   }
 
   function setupObservers() {
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((records) => {
+      if (mutationsAreOnlyKaPlusUi(records)) return;
       if (!document.getElementById("ka-enhanced-root")) {
         createPanel();
       }
@@ -2501,6 +3449,7 @@
   window.addEventListener("popstate", scheduleKaPlusRefresh);
 
   createPanel();
+  setupWatchlistPriceCapture();
   setupObservers();
   applyPreferredSort();
   applyHideTopAdsStyle();
