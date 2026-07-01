@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.69
+// @version      1.2.70
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -1122,14 +1122,6 @@
     return out;
   }
 
-  function imageUrlRuleScore(url) {
-    const m = url.match(/\$_?(\d+)\.(AUTO|JPG|WEBP|JPEG)/i);
-    if (!m) return 0;
-    let s = parseInt(m[1], 10);
-    if (String(m[2]).toUpperCase() === "JPG" || String(m[2]).toUpperCase() === "JPEG") s += 0.1;
-    return s;
-  }
-
   /** Numerischer Vergleich: höher = mehr erwartete Pixelqualität (JPG vor AUTO bei gleicher Stufe). */
   function kleinProdAdsUrlQuality(url) {
     try {
@@ -1152,7 +1144,7 @@
     const urls = [];
     if (!doc || !doc.querySelectorAll) return urls;
     const sel =
-      "#viewad-images img, #viewad-images picture source, [id*='viewad-image'] img, [data-testid*='gallery'] img, [data-testid*='Gallery'] img";
+      "#viewad-images img, #viewad-images picture source, [id*='viewad-image'] img, [data-testid*='gallery'] img, [data-testid*='Gallery'] img, .vip-image-gallery img, .vip-image-gallery picture source";
     doc.querySelectorAll(sel).forEach((el) => {
       const tag = el.tagName && el.tagName.toUpperCase();
       if (tag === "SOURCE") {
@@ -1175,7 +1167,7 @@
   function scrapeKleinanzeigenImageUrlsFromHtmlString(html) {
     const out = [];
     if (!html) return out;
-    const re = /https:\/\/img\.kleinanzeigen\.de\/[^"'\\s<>)]+/gi;
+    const re = /https:\/\/img\.kleinanzeigen\.de\/[^"'\s<>)]+/gi;
     let m;
     while ((m = re.exec(html)) !== null) {
       let u = m[0].replace(/&amp;/g, "&").replace(/\\u002F/gi, "/");
@@ -1220,23 +1212,33 @@
     }
   }
 
-  function pickBestGalleryUrlForThumb(candidates, thumbUrl) {
-    const arr = [...new Set(candidates)].filter(Boolean);
-    if (!arr.length) return "";
-    const thumbKey = extractLikelyImageIdFromUrl(thumbUrl);
-    if (thumbKey) {
-      const hit = arr.find((u) => u.includes(thumbKey));
-      if (hit) return upgradeKleinanzeigenImageUrl(hit);
+  /** Entfernt Duplikate (gleiches Bild in unterschiedlichen Auflösungen) und wählt jeweils die beste Regel. */
+  function dedupeGalleryUrls(candidates) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of candidates) {
+      if (!raw) continue;
+      const upgraded = upgradeKleinanzeigenImageUrl(raw);
+      const key = extractLikelyImageIdFromUrl(upgraded) || upgraded;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(upgraded);
     }
-    const upgraded = arr.map((u) => upgradeKleinanzeigenImageUrl(u));
-    upgraded.sort((a, b) => imageUrlRuleScore(b) - imageUrlRuleScore(a));
-    return upgraded[0] || "";
+    return out;
   }
 
-  async function resolveHighResListingImage(listingHref, thumbUrl, signal) {
+  /** Liefert alle Bilder der Anzeige in Galerie-Reihenfolge plus den Index des angeklickten Thumbnails. */
+  async function resolveListingGallery(listingHref, thumbUrl, signal) {
     const cands = await fetchListingImageCandidates(listingHref, signal);
-    const best = pickBestGalleryUrlForThumb(cands, thumbUrl);
-    return best || "";
+    const images = dedupeGalleryUrls(cands);
+    if (!images.length) return { images: [], startIndex: 0 };
+    const thumbKey = extractLikelyImageIdFromUrl(thumbUrl);
+    let startIndex = 0;
+    if (thumbKey) {
+      const idx = images.findIndex((u) => extractLikelyImageIdFromUrl(u) === thumbKey);
+      if (idx >= 0) startIndex = idx;
+    }
+    return { images, startIndex };
   }
 
   function bestImageUrlFromEl(el) {
@@ -2028,6 +2030,8 @@
       const needsRebuild =
         !inner?.querySelector("#ka-plus-lightbox-figure-wrap") ||
         !inner?.querySelector("#ka-plus-lightbox-img-frame") ||
+        !inner?.querySelector("#ka-plus-lightbox-prev") ||
+        !inner?.querySelector("#ka-plus-lightbox-next") ||
         inner.firstElementChild?.id === "ka-plus-lightbox-toolbar";
       if (needsRebuild) {
         lb.remove();
@@ -2153,6 +2157,61 @@
           outline: 2px solid #ffc107;
           outline-offset: 2px;
         }
+        #ka-plus-lightbox-prev,
+        #ka-plus-lightbox-next {
+          position: absolute;
+          top: 50%;
+          transform: translateY(-50%);
+          width: 44px;
+          height: 44px;
+          min-width: 44px;
+          min-height: 44px;
+          padding: 0;
+          margin: 0;
+          border: none;
+          border-radius: 50%;
+          box-sizing: border-box;
+          background: rgba(255,255,255,0.92);
+          color: #1d4b00;
+          cursor: pointer;
+          box-shadow: 0 3px 14px rgba(0,0,0,0.35);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 2;
+        }
+        #ka-plus-lightbox-prev { left: 6px; }
+        #ka-plus-lightbox-next { right: 6px; }
+        #ka-plus-lightbox-prev svg,
+        #ka-plus-lightbox-next svg {
+          display: block;
+          flex-shrink: 0;
+        }
+        #ka-plus-lightbox-prev:focus-visible,
+        #ka-plus-lightbox-next:focus-visible {
+          outline: 2px solid #ffc107;
+          outline-offset: 2px;
+        }
+        #ka-plus-lightbox-counter {
+          position: absolute;
+          bottom: 8px;
+          left: 50%;
+          transform: translateX(-50%);
+          padding: 4px 12px;
+          border-radius: 9999px;
+          background: rgba(0,0,0,0.55);
+          color: #fff;
+          font-size: 12px;
+          font-family: Arial, Helvetica, sans-serif;
+          font-weight: 600;
+          z-index: 2;
+          pointer-events: none;
+        }
+        #ka-plus-lightbox[data-ka-multi="0"] #ka-plus-lightbox-prev,
+        #ka-plus-lightbox[data-ka-multi="0"] #ka-plus-lightbox-next,
+        #ka-plus-lightbox[data-ka-multi="0"] #ka-plus-lightbox-counter {
+          display: none;
+        }
       </style>
       <div id="ka-plus-lightbox-inner">
         <div id="ka-plus-lightbox-figure-wrap">
@@ -2163,6 +2222,17 @@
                 <path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
               </svg>
             </button>
+            <button type="button" id="ka-plus-lightbox-prev" aria-label="Vorheriges Bild">
+              <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <button type="button" id="ka-plus-lightbox-next" aria-label="Nächstes Bild">
+              <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <div id="ka-plus-lightbox-counter"></div>
           </div>
         </div>
         <div id="ka-plus-lightbox-toolbar">
@@ -2176,11 +2246,74 @@
       closeKaPlusLightbox();
     });
     lb.querySelector("#ka-plus-lightbox-link").addEventListener("click", (e) => e.stopPropagation());
+    lb.querySelector("#ka-plus-lightbox-prev").addEventListener("click", (e) => {
+      e.stopPropagation();
+      stepKaPlusLightbox(-1);
+    });
+    lb.querySelector("#ka-plus-lightbox-next").addEventListener("click", (e) => {
+      e.stopPropagation();
+      stepKaPlusLightbox(1);
+    });
     lb.addEventListener("click", (e) => {
       if (e.target === lb) closeKaPlusLightbox();
     });
     return lb;
   }
+
+  /** Aktualisiert Bildzähler und Sichtbarkeit der Pfeil-Buttons je nach Anzahl Galeriebilder. */
+  function updateKaPlusLightboxNav(lb) {
+    const gallery = lb._kaPlusGallery;
+    const images = gallery?.images || [];
+    const index = gallery?.index || 0;
+    lb.dataset.kaMulti = images.length > 1 ? "1" : "0";
+    const counter = lb.querySelector("#ka-plus-lightbox-counter");
+    if (counter) counter.textContent = images.length > 1 ? `${index + 1} / ${images.length}` : "";
+  }
+
+  function showKaPlusLightboxImage(lb, index) {
+    const gallery = lb._kaPlusGallery;
+    if (!gallery || !gallery.images.length) return;
+    const len = gallery.images.length;
+    gallery.index = ((index % len) + len) % len;
+    updateKaPlusLightboxNav(lb);
+
+    const img = lb.querySelector("#ka-plus-lightbox-img");
+    const url = gallery.images[gallery.index];
+    const fallbacks = [kleinTo59AutoUrl(url)].filter((u) => u && u !== url);
+    let fi = -1;
+    img.onerror = function kaLbNavFallback() {
+      fi += 1;
+      if (fi < fallbacks.length) img.src = fallbacks[fi];
+      else img.onerror = null;
+    };
+    img.src = url;
+  }
+
+  function stepKaPlusLightbox(delta) {
+    const lb = document.getElementById("ka-plus-lightbox");
+    if (!lb || !lb.classList.contains("ka-open")) return;
+    const gallery = lb._kaPlusGallery;
+    if (!gallery || gallery.images.length < 2) return;
+    showKaPlusLightboxImage(lb, gallery.index + delta);
+  }
+
+  document.addEventListener("keydown", (e) => {
+    const lb = document.getElementById("ka-plus-lightbox");
+    if (!lb || !lb.classList.contains("ka-open")) return;
+    if (e.key === "Escape") {
+      closeKaPlusLightbox();
+      return;
+    }
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      stepKaPlusLightbox(-1);
+      return;
+    }
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      stepKaPlusLightbox(1);
+    }
+  });
 
   function openLightbox(imageUrl, listingHref) {
     const lb = ensureLightbox();
@@ -2205,6 +2338,9 @@
     };
     img.src = tryUrls[0] || thumb;
 
+    lb._kaPlusGallery = { images: [tryUrls[0] || thumb], index: 0 };
+    updateKaPlusLightboxNav(lb);
+
     link.href = listingHref || "#";
     const toolbar = lb.querySelector("#ka-plus-lightbox-toolbar");
     if (toolbar) toolbar.style.display = listingHref ? "flex" : "none";
@@ -2217,12 +2353,15 @@
     lb._kaPlusLightboxAbort = ac;
     const fallbackSrc = tryUrls[0] || thumb;
 
-    resolveHighResListingImage(listingHref, thumb, ac.signal)
-      .then((hi) => {
-        if (ac.signal.aborted || !hi) return;
+    resolveListingGallery(listingHref, thumb, ac.signal)
+      .then(({ images, startIndex }) => {
+        if (ac.signal.aborted || !images.length) return;
         if (!lb.classList.contains("ka-open")) return;
 
-        const candidate = upgradeKleinanzeigenImageUrl(hi);
+        lb._kaPlusGallery = { images, index: startIndex };
+        updateKaPlusLightboxNav(lb);
+
+        const candidate = images[startIndex];
         const cur = img.currentSrc || img.src || "";
         try {
           if (candidate && new URL(candidate).href === new URL(cur, location.href).href) return;
@@ -2234,7 +2373,7 @@
         const qCur = kleinProdAdsUrlQuality(cur);
         if (qCand <= qCur) return;
 
-        const fb = [...new Set([kleinTo59AutoUrl(hi), fallbackSrc])].filter((u) => u && u !== candidate);
+        const fb = [...new Set([kleinTo59AutoUrl(candidate), fallbackSrc])].filter((u) => u && u !== candidate);
         let fi = -1;
 
         img.onerror = function kaLbHiFallback() {
