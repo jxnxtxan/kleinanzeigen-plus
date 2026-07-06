@@ -8,6 +8,7 @@ Userscript fuer `kleinanzeigen.de` mit einer kleinen Tools-Oberflaeche, automati
 - Einstellungs-Panel direkt auf der Seite
 - Automatische Standard-Sortierung
 - **Anzeige (`/s-anzeige/…`)**: Notizen (Speichern/Löschen, eigener Speicher `kaPlusNotesV1`), **Als PDF speichern** (direkter Download via eingebetteter [html2pdf.js](https://github.com/eKoopmans/html2pdf.js), `@require` im Script)
+- **Bilder vorab laden**: Galeriebilder der Anzeige werden im Voraus geladen (statt erst beim Weiterklicken); Anzahl einstellbar (`0` = alle, zusätzlich ein Bild rückwärts)
 - **Suche**: gelbe Lupen-Schaltfläche auf Kartenbildern, Lightbox mit größtmöglicher Bild-URL
 - Auto-Update ueber Tampermonkey/Violentmonkey
 

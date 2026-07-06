@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.70
-// @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, TOP-Anzeigen ausblendbar, Tools-Panel.
+// @version      1.2.71
+// @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Galerie-Bilder vorab laden, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
 // @supportURL   https://github.com/jxnxtxan/kleinanzeigen-plus/issues
@@ -35,7 +35,17 @@
     lupeEnabled: true,
     pdfEnabled: true,
     hideTopAdsEnabled: false,
+    imagePreloadEnabled: false,
+    imagePreloadCount: 3,
   };
+  const IMAGE_PRELOAD_COUNT_MIN = 0; // 0 = alle Bilder
+  const IMAGE_PRELOAD_COUNT_MAX = 50;
+
+  function normalizeImagePreloadCount(value) {
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n)) return DEFAULT_SETTINGS.imagePreloadCount;
+    return Math.min(IMAGE_PRELOAD_COUNT_MAX, Math.max(IMAGE_PRELOAD_COUNT_MIN, n));
+  }
   const VALID_SORTS = ["Neueste", "Niedrigster Preis", "Höchster Preis"];
   const SORT_URL_SLUG = {
     Neueste: null,
@@ -221,6 +231,12 @@
         lupeEnabled: parsed.lupeEnabled !== false,
         pdfEnabled: parsed.pdfEnabled !== false,
         hideTopAdsEnabled: parsed.hideTopAdsEnabled === true,
+        imagePreloadEnabled: parsed.imagePreloadEnabled === true,
+        imagePreloadCount: normalizeImagePreloadCount(
+          parsed.imagePreloadCount === undefined
+            ? DEFAULT_SETTINGS.imagePreloadCount
+            : parsed.imagePreloadCount
+        ),
       };
     } catch {
       return { ...DEFAULT_SETTINGS };
@@ -3112,6 +3128,106 @@
     syncTopAdDomHide();
   }
 
+  /* ---------------------------------------------------------------------------
+   * Bild-Vorladen auf der Anzeigenseite
+   *
+   * Die native Galerie hält jedes Bild in einem Slide `.galleryimage-element`.
+   * Nur der aktive Slide (`.current`) ist eager geladen; alle anderen sind
+   * `loading="lazy"` und werden erst beim Sichtbarwerden geholt. Wir laden die
+   * URLs im Fenster [aktuell-1 … aktuell+N] per `new Image()` vor, damit der
+   * Browser sie beim Durchklicken sofort aus dem Cache liefert. Native
+   * DOM-Attribute bleiben unangetastet.
+   * ------------------------------------------------------------------------- */
+  const kaPlusPreloadedUrls = new Set();
+  const kaPlusPreloadPending = new Map();
+  let galleryPreloadObserver = null;
+  let galleryPreloadTimer = 0;
+
+  function getGallerySlides() {
+    return Array.from(document.querySelectorAll(".galleryimage-element"));
+  }
+
+  function getGalleryImageUrl(slide) {
+    if (!slide) return "";
+    const img = slide.querySelector("img");
+    if (!img) return "";
+    return img.getAttribute("src") || img.getAttribute("data-imgsrc") || "";
+  }
+
+  function getCurrentGalleryIndex(slides) {
+    const list = slides || getGallerySlides();
+    const idx = list.findIndex((s) => s.classList.contains("current"));
+    return idx < 0 ? 0 : idx;
+  }
+
+  function preloadImageUrl(url) {
+    if (!url || url.startsWith("data:")) return;
+    if (kaPlusPreloadedUrls.has(url) || kaPlusPreloadPending.has(url)) return;
+    const img = new Image();
+    const done = () => {
+      kaPlusPreloadedUrls.add(url);
+      kaPlusPreloadPending.delete(url);
+    };
+    img.onload = done;
+    img.onerror = () => kaPlusPreloadPending.delete(url);
+    kaPlusPreloadPending.set(url, img); // Referenz halten, bis der Request fertig ist
+    img.src = url;
+  }
+
+  function runImagePreload() {
+    const settings = loadSettings();
+    if (!settings.imagePreloadEnabled || !isAdDetailPage()) return;
+    const slides = getGallerySlides();
+    if (!slides.length) return;
+    const count = normalizeImagePreloadCount(settings.imagePreloadCount);
+    const current = getCurrentGalleryIndex(slides);
+    let start, end;
+    if (count === 0) {
+      // 0 = alle Bilder vorladen
+      start = 0;
+      end = slides.length - 1;
+    } else {
+      start = Math.max(0, current - 1); // ein Bild zurück
+      end = Math.min(slides.length - 1, current + count); // N Bilder vorwärts
+    }
+    for (let i = start; i <= end; i++) {
+      preloadImageUrl(getGalleryImageUrl(slides[i]));
+    }
+  }
+
+  function scheduleImagePreload() {
+    clearTimeout(galleryPreloadTimer);
+    galleryPreloadTimer = window.setTimeout(runImagePreload, 100);
+  }
+
+  function ensureGalleryPreloadObserver() {
+    const settings = loadSettings();
+    if (!settings.imagePreloadEnabled || !isAdDetailPage()) {
+      if (galleryPreloadObserver) {
+        galleryPreloadObserver.disconnect();
+        galleryPreloadObserver = null;
+      }
+      return;
+    }
+    if (galleryPreloadObserver) return;
+    const gallery = document.querySelector(".vip-image-gallery, .j-gallery-image");
+    if (!gallery) return; // Galerie noch nicht im DOM – späterer Refresh-Durchlauf hängt sich ein
+    galleryPreloadObserver = new MutationObserver(() => {
+      if (!loadSettings().imagePreloadEnabled) return;
+      scheduleImagePreload();
+    });
+    galleryPreloadObserver.observe(gallery, {
+      attributes: true,
+      attributeFilter: ["class"],
+      subtree: true,
+    });
+  }
+
+  function applyImagePreload() {
+    ensureGalleryPreloadObserver();
+    runImagePreload();
+  }
+
   const KA_PLUS_UI_MUTATION_SELECTORS = [
     "#ka-enhanced-root",
     "#ka-plus-ad-tools",
@@ -3154,6 +3270,7 @@
       renderWatchlistPriceBadges();
       syncLupeUi();
       applyHideTopAdsStyle();
+      applyImagePreload();
     }, 120);
   }
 
@@ -3163,6 +3280,7 @@
     renderWatchlistPriceBadges();
     syncLupeUi();
     applyHideTopAdsStyle();
+    applyImagePreload();
   }
 
   function createPanel() {
@@ -3446,6 +3564,21 @@
             </label>
           </div>
         </section>
+
+        <section class="ka-tools-category" aria-labelledby="ka-cat-images">
+          <h5 class="ka-tools-category-title" id="ka-cat-images">Bilder auf der Anzeigenseite</h5>
+          <div class="ka-row">
+            <label>
+              <input id="ka-image-preload-enabled" type="checkbox" ${settings.imagePreloadEnabled === true ? "checked" : ""}>
+              Bilder der Anzeige vorab laden
+            </label>
+          </div>
+          <div class="ka-row ka-sort-row" id="ka-image-preload-count-row">
+            <label for="ka-image-preload-count">Anzahl vorzuladender Bilder</label>
+            <input id="ka-image-preload-count" type="number" min="${IMAGE_PRELOAD_COUNT_MIN}" max="${IMAGE_PRELOAD_COUNT_MAX}" step="1" value="${normalizeImagePreloadCount(settings.imagePreloadCount)}" style="width:64px;">
+          </div>
+          <p class="ka-image-preload-hint" style="margin:2px 0 0;font-size:11px;color:#666;">0 = alle Bilder vorladen. Lädt zusätzlich ein Bild zurück.</p>
+        </section>
       </div>
     `;
 
@@ -3472,7 +3605,17 @@
     const watchlistPriceReAddModeInput = root.querySelector("#ka-watchlist-price-readd-mode");
     const lupeEnabledInput = root.querySelector("#ka-lupe-enabled");
     const hideTopAdsInput = root.querySelector("#ka-hide-top-ads");
+    const imagePreloadEnabledInput = root.querySelector("#ka-image-preload-enabled");
+    const imagePreloadCountInput = root.querySelector("#ka-image-preload-count");
+    const imagePreloadCountRow = root.querySelector("#ka-image-preload-count-row");
     const selectInput = root.querySelector("#ka-sort-select");
+
+    function syncImagePreloadSubgroupUi() {
+      const on = imagePreloadEnabledInput?.checked ?? false;
+      if (imagePreloadCountRow) imagePreloadCountRow.classList.toggle("disabled", !on);
+      if (imagePreloadCountInput) imagePreloadCountInput.disabled = !on;
+    }
+    syncImagePreloadSubgroupUi();
 
     function syncAdDetailExtrasSubgroupUi() {
       const on = adDetailExtrasMasterInput?.checked ?? true;
@@ -3563,6 +3706,20 @@
       saveSettings(next);
       applyHideTopAdsStyle();
     });
+    imagePreloadEnabledInput?.addEventListener("change", () => {
+      const next = loadSettings();
+      next.imagePreloadEnabled = imagePreloadEnabledInput.checked;
+      saveSettings(next);
+      syncImagePreloadSubgroupUi();
+      applyImagePreload();
+    });
+    imagePreloadCountInput?.addEventListener("change", () => {
+      const next = loadSettings();
+      next.imagePreloadCount = normalizeImagePreloadCount(imagePreloadCountInput.value);
+      saveSettings(next);
+      imagePreloadCountInput.value = String(next.imagePreloadCount);
+      applyImagePreload();
+    });
     selectInput.addEventListener("change", () => {
       const next = loadSettings();
       next.preferredSort = selectInput.value;
@@ -3592,5 +3749,6 @@
   setupObservers();
   applyPreferredSort();
   applyHideTopAdsStyle();
+  applyImagePreload();
   scheduleKaPlusRefresh();
 })();
