@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.71
+// @version      1.2.72
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Galerie-Bilder vorab laden, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -3453,6 +3453,49 @@
         .ka-tools-category > .ka-row input[type="checkbox"] {
           accent-color: #1d4b00;
         }
+        .ka-image-preload-count-row {
+          display: flex;
+          flex-direction: row;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .ka-image-preload-count-row > label {
+          display: block;
+          flex: 1;
+          min-width: 0;
+          margin: 0;
+          line-height: 1.35;
+        }
+        #ka-image-preload-count {
+          width: 72px;
+          padding: 6px 8px;
+          border-radius: 8px;
+          border: 1px solid #ccc;
+          box-sizing: border-box;
+          font-size: 13px;
+          text-align: center;
+          flex-shrink: 0;
+        }
+        #ka-image-preload-count:focus-visible {
+          outline: 2px solid #5b39c6;
+          outline-offset: 0;
+          box-shadow: none;
+        }
+        #ka-image-preload-count:disabled {
+          background: #f5f5f5;
+          color: #888;
+          cursor: not-allowed;
+        }
+        .ka-tools-hint {
+          margin: 6px 0 0;
+          padding: 6px 8px;
+          font-size: 11px;
+          line-height: 1.45;
+          color: #666;
+          background: #f7f7f7;
+          border-radius: 6px;
+        }
       </style>
       <button id="ka-enhanced-open-btn" type="button" title="Kleinanzeigen Einstellungen">
         <span class="ka-tools-icon" aria-hidden="true"></span>
@@ -3573,11 +3616,13 @@
               Bilder der Anzeige vorab laden
             </label>
           </div>
-          <div class="ka-row ka-sort-row" id="ka-image-preload-count-row">
-            <label for="ka-image-preload-count">Anzahl vorzuladender Bilder</label>
-            <input id="ka-image-preload-count" type="number" min="${IMAGE_PRELOAD_COUNT_MIN}" max="${IMAGE_PRELOAD_COUNT_MAX}" step="1" value="${normalizeImagePreloadCount(settings.imagePreloadCount)}" style="width:64px;">
+          <div class="ka-tools-sub" id="ka-image-preload-sub">
+            <div class="ka-row ka-image-preload-count-row">
+              <label for="ka-image-preload-count">Anzahl vorzuladender Bilder</label>
+              <input id="ka-image-preload-count" type="number" min="${IMAGE_PRELOAD_COUNT_MIN}" max="${IMAGE_PRELOAD_COUNT_MAX}" step="1" value="${normalizeImagePreloadCount(settings.imagePreloadCount)}" aria-describedby="ka-image-preload-hint">
+            </div>
+            <p class="ka-tools-hint" id="ka-image-preload-hint"><strong>0</strong> = alle Bilder &middot; zusätzlich wird jeweils ein Bild rückwärts geladen</p>
           </div>
-          <p class="ka-image-preload-hint" style="margin:2px 0 0;font-size:11px;color:#666;">0 = alle Bilder vorladen. Lädt zusätzlich ein Bild zurück.</p>
         </section>
       </div>
     `;
@@ -3606,13 +3651,13 @@
     const lupeEnabledInput = root.querySelector("#ka-lupe-enabled");
     const hideTopAdsInput = root.querySelector("#ka-hide-top-ads");
     const imagePreloadEnabledInput = root.querySelector("#ka-image-preload-enabled");
+    const imagePreloadSub = root.querySelector("#ka-image-preload-sub");
     const imagePreloadCountInput = root.querySelector("#ka-image-preload-count");
-    const imagePreloadCountRow = root.querySelector("#ka-image-preload-count-row");
     const selectInput = root.querySelector("#ka-sort-select");
 
     function syncImagePreloadSubgroupUi() {
       const on = imagePreloadEnabledInput?.checked ?? false;
-      if (imagePreloadCountRow) imagePreloadCountRow.classList.toggle("disabled", !on);
+      if (imagePreloadSub) imagePreloadSub.classList.toggle("disabled", !on);
       if (imagePreloadCountInput) imagePreloadCountInput.disabled = !on;
     }
     syncImagePreloadSubgroupUi();
