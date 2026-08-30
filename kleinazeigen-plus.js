@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.72
+// @version      1.2.73
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Galerie-Bilder vorab laden, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
@@ -85,9 +85,13 @@
     return window.location.pathname.startsWith("/s-anzeige/");
   }
 
+  function isProfilePage(pathname = window.location.pathname) {
+    return /bestandsliste\.html$/i.test(pathname);
+  }
+
   function isSearchPage() {
     const p = window.location.pathname;
-    return p.startsWith("/s-") && !p.startsWith("/s-anzeige/");
+    return p.startsWith("/s-") && !p.startsWith("/s-anzeige/") && !isProfilePage(p);
   }
 
   function isWatchlistPage() {
@@ -270,6 +274,13 @@
     if (!pathname.startsWith("/s-")) return null;
     if (pathname.startsWith("/s-anzeige/")) return null;
 
+    if (isProfilePage(pathname)) {
+      if (/^\/s-sortierung:[^/]+\//.test(pathname)) {
+        return pathname.replace(/^\/s-sortierung:[^/]+\//, "/s-");
+      }
+      return null;
+    }
+
     const slug = SORT_URL_SLUG[sortName];
     const hasLeadingSortSegment = /^\/s-sortierung:[^/]+\/.+/.test(pathname);
     const hasInnerSortSegment = /\/sortierung:[^/]+\//.test(pathname);
@@ -373,6 +384,12 @@
   function applyPreferredSort() {
     const settings = loadSettings();
     if (!settings.autoSortEnabled || isApplyingSort) return;
+
+    if (!isSearchPage()) {
+      applySortByUrl(settings.preferredSort);
+      return;
+    }
+
     isApplyingSort = true;
 
     const appliedViaUrl = applySortByUrl(settings.preferredSort);
