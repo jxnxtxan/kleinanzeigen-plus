@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.73
-// @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Galerie-Bilder vorab laden, TOP-Anzeigen ausblendbar, Tools-Panel.
+// @version      1.2.76
+// @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Merken-Herz direkt in der Trefferliste, Galerie-Bilder vorab laden, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
 // @supportURL   https://github.com/jxnxtxan/kleinanzeigen-plus/issues
@@ -21,6 +21,7 @@
   const STORAGE_KEY = "kaEnhancedSettings";
   const NOTES_STORAGE_KEY = "kaPlusNotesV1";
   const WATCHLIST_PRICES_STORAGE_KEY = "kaPlusWatchlistPricesV1";
+  const WATCHLIST_IDS_STORAGE_KEY = "kaPlusKnownWatchlistIdsV1";
   const DEFAULT_SETTINGS = {
     autoSortEnabled: true,
     preferredSort: "Niedrigster Preis",
@@ -33,6 +34,7 @@
     watchlistPriceReAddMode: "append",
     watchlistPriceReAddPrompt: true,
     lupeEnabled: true,
+    searchWatchlistHeartEnabled: true,
     pdfEnabled: true,
     hideTopAdsEnabled: false,
     imagePreloadEnabled: false,
@@ -212,6 +214,48 @@
     persistPriceEntriesForAd(adId, [entry]);
   }
 
+  /**
+   * Lokal bekannter Merkliste-Status je Anzeige (adId -> true), gespeist aus eigenen
+   * Aktionen (Herz-Klick, Klick auf den echten Merkliste-Button irgendwo im Dokument).
+   * Kein Sync mit dem Server: Anzeigen, die nie in diesem Browser angefasst wurden,
+   * gelten bis zur ersten Interaktion als nicht gemerkt.
+   */
+  function loadKnownWatchlistIds() {
+    try {
+      const raw = localStorage.getItem(WATCHLIST_IDS_STORAGE_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  function saveKnownWatchlistIds(set) {
+    localStorage.setItem(WATCHLIST_IDS_STORAGE_KEY, JSON.stringify(Array.from(set)));
+  }
+
+  function isAdKnownOnWatchlist(adId) {
+    if (!adId) return false;
+    return loadKnownWatchlistIds().has(adId);
+  }
+
+  function markAdKnownOnWatchlist(adId) {
+    if (!adId) return;
+    const set = loadKnownWatchlistIds();
+    if (set.has(adId)) return;
+    set.add(adId);
+    saveKnownWatchlistIds(set);
+  }
+
+  function markAdKnownOffWatchlist(adId) {
+    if (!adId) return;
+    const set = loadKnownWatchlistIds();
+    if (!set.has(adId)) return;
+    set.delete(adId);
+    saveKnownWatchlistIds(set);
+  }
+
   function loadSettings() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -233,6 +277,7 @@
           parsed.watchlistPriceReAddMode === "overwrite" ? "overwrite" : "append",
         watchlistPriceReAddPrompt: parsed.watchlistPriceReAddPrompt !== false,
         lupeEnabled: parsed.lupeEnabled !== false,
+        searchWatchlistHeartEnabled: parsed.searchWatchlistHeartEnabled !== false,
         pdfEnabled: parsed.pdfEnabled !== false,
         hideTopAdsEnabled: parsed.hideTopAdsEnabled === true,
         imagePreloadEnabled: parsed.imagePreloadEnabled === true,
@@ -640,6 +685,51 @@
     return { adId, priceText: getPriceTextFromListingCard(cardRoot || cardLink?.closest("article, li")) };
   }
 
+  /**
+   * CSRF-Credentials für /m-merkliste-bearbeiten.html. Klassisch gerenderte Seiten (Anzeige,
+   * Merkliste) tragen ein <meta name="_csrf">; auf Astro-gerenderten Suchseiten steckt der
+   * Token stattdessen in einem eingebetteten JSON-Blob (window "webContext").
+   */
+  function getWatchlistCsrfCredentials() {
+    const meta = document.querySelector('meta[name="_csrf"]');
+    if (meta?.content) {
+      const headerMeta = document.querySelector('meta[name="_csrf_header"]');
+      return { token: meta.content, header: headerMeta?.content || "X-CSRF-TOKEN" };
+    }
+    for (const script of document.querySelectorAll("script")) {
+      const text = script.textContent;
+      if (!text || !text.includes("csrfToken")) continue;
+      const m = text.match(/"csrfToken"\s*:\s*"([^"]{8,})"/);
+      if (m && m[1]) return { token: m[1], header: "X-CSRF-TOKEN" };
+    }
+    return null;
+  }
+
+  /** action: "store" (hinzufügen) oder "del" (entfernen). */
+  async function postWatchlistAction(adId, action) {
+    if (!adId) return false;
+    const cred = getWatchlistCsrfCredentials();
+    if (!cred) return false;
+    const headers = {
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "X-Requested-With": "XMLHttpRequest",
+    };
+    headers[cred.header] = cred.token;
+    try {
+      const res = await fetch("/m-merkliste-bearbeiten.html", {
+        method: "POST",
+        headers,
+        credentials: "same-origin",
+        body: new URLSearchParams({ adId, action }).toString(),
+      });
+      if (!res.ok) return false;
+      const data = await res.json().catch(() => null);
+      return data?.status === "OK";
+    } catch {
+      return false;
+    }
+  }
+
   function createPriceEntry(parsed) {
     return {
       priceCents: parsed.priceCents,
@@ -765,14 +855,17 @@
     if (!context?.adId) return;
 
     if (isWatchlistRemoveAction(el)) {
+      markAdKnownOffWatchlist(context.adId);
       if (settings.watchlistPriceDeleteOnRemove === true) {
         clearPriceForAd(context.adId);
-        scheduleKaPlusRefresh();
       }
+      scheduleKaPlusRefresh();
       return;
     }
 
     if (!isWatchlistAddAction(el)) return;
+    markAdKnownOnWatchlist(context.adId);
+    scheduleKaPlusRefresh();
     if (settings.watchlistPriceSaveEnabled === false) return;
 
     saveWatchlistPriceForAd(context.adId, context.priceText).then((saved) => {
@@ -2947,9 +3040,7 @@
     syncAllWatchlistNoteHeights();
   }
 
-  function enhanceSearchCards() {
-    if (!isSearchPage()) return;
-    if (loadSettings().lupeEnabled === false) return;
+  function collectSearchListingCards() {
     let cards = Array.from(document.querySelectorAll("article")).filter(
       (a) => a.querySelector('a[href*="/s-anzeige/"]') && a.querySelector("img")
     );
@@ -2958,6 +3049,13 @@
         .map((link) => findListingCardRoot(link))
         .filter((c, i, arr) => c && c.querySelector?.("img") && arr.indexOf(c) === i);
     }
+    return cards;
+  }
+
+  function enhanceSearchCards() {
+    if (!isSearchPage()) return;
+    if (loadSettings().lupeEnabled === false) return;
+    const cards = collectSearchListingCards();
     cards.forEach((card) => {
       if (card.dataset.kaPlusLupe === "1") return;
       const link = card.querySelector('a[href*="/s-anzeige/"]');
@@ -3031,6 +3129,190 @@
       return;
     }
     enhanceSearchCards();
+  }
+
+  const KA_PLUS_HEART_OUTLINE_SVG = `
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" style="display:block;">
+      <path transform="translate(1,0)" d="M12 20.2s-7.6-4.6-10.2-9.1C.3 8.4 1.4 5 4.6 4.1c2.1-.6 4.2.3 5.4 2.1.4.6 1.6.6 2 0 1.2-1.8 3.3-2.7 5.4-2.1 3.2.9 4.3 4.3 2.8 7-2.6 4.5-10.2 9.1-10.2 9.1z"
+        fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+    </svg>
+  `;
+  const KA_PLUS_HEART_FILLED_SVG = `
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" style="display:block;">
+      <path transform="translate(1,0)" d="M12 20.2s-7.6-4.6-10.2-9.1C.3 8.4 1.4 5 4.6 4.1c2.1-.6 4.2.3 5.4 2.1.4.6 1.6.6 2 0 1.2-1.8 3.3-2.7 5.4-2.1 3.2.9 4.3 4.3 2.8 7-2.6 4.5-10.2 9.1-10.2 9.1z"
+        fill="#e6193c" stroke="#e6193c" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+    </svg>
+  `;
+
+  function setHeartButtonState(btn, onWatchlist) {
+    btn.dataset.kaPlusHeartOn = onWatchlist ? "1" : "0";
+    btn.innerHTML = onWatchlist ? KA_PLUS_HEART_FILLED_SVG : KA_PLUS_HEART_OUTLINE_SVG;
+    btn.title = onWatchlist ? "Von Merkliste entfernen" : "Zur Merkliste hinzufügen";
+    btn.setAttribute("aria-label", btn.title);
+    btn.setAttribute("aria-pressed", onWatchlist ? "true" : "false");
+  }
+
+  function onSearchCardHeartClick(btn, adId) {
+    if (btn.dataset.kaPlusHeartBusy === "1") return;
+    const wasOn = btn.dataset.kaPlusHeartOn === "1";
+    const action = wasOn ? "del" : "store";
+    btn.dataset.kaPlusHeartBusy = "1";
+    setHeartButtonState(btn, !wasOn);
+    btn.style.opacity = "0.6";
+    postWatchlistAction(adId, action).then((ok) => {
+      btn.dataset.kaPlusHeartBusy = "0";
+      btn.style.opacity = "1";
+      if (ok) {
+        if (wasOn) markAdKnownOffWatchlist(adId);
+        else markAdKnownOnWatchlist(adId);
+        return;
+      }
+      setHeartButtonState(btn, wasOn);
+    });
+  }
+
+  /**
+   * Serverabgleich für den Merkliste-Status: der lokale Cache (kaPlusKnownWatchlistIdsV1)
+   * kennt anfangs nur Anzeigen, die in diesem Browser über dieses Skript be- oder entmerkt
+   * wurden. Anzeigen, die vorher oder anderswo gemerkt wurden, würden sonst dauerhaft mit
+   * leerem Herz erscheinen. Deshalb wird einmal pro Cooldown-Fenster die echte Merkliste
+   * abgerufen und ergänzend (nur hinzufügend, nie entfernend) in den Cache gemischt – so
+   * gewinnt ein gerade lokal ausgelöster Klick nie gegen eine ältere Serverantwort.
+   */
+  let watchlistServerSyncInFlight = null;
+  let watchlistServerSyncedAt = 0;
+  const WATCHLIST_SERVER_SYNC_COOLDOWN_MS = 60000;
+
+  function parseWatchlistIdsFromHtml(html) {
+    const ids = new Set();
+    const re = /\/s-anzeige\/[^"'>]+\/(\d{6,})-/g;
+    let m;
+    while ((m = re.exec(html))) ids.add(m[1]);
+    return ids;
+  }
+
+  async function fetchServerWatchlistIds() {
+    try {
+      const res = await fetch("/m-merkliste.html", { credentials: "same-origin" });
+      if (!res.ok) return null;
+      const html = await res.text();
+      return parseWatchlistIdsFromHtml(html);
+    } catch {
+      return null;
+    }
+  }
+
+  function mergeKnownWatchlistIds(serverIds) {
+    const local = loadKnownWatchlistIds();
+    let changed = false;
+    serverIds.forEach((id) => {
+      if (!local.has(id)) {
+        local.add(id);
+        changed = true;
+      }
+    });
+    if (changed) saveKnownWatchlistIds(local);
+    return changed;
+  }
+
+  function refreshSearchWatchlistHeartButtons() {
+    document.querySelectorAll(".ka-plus-watchlist-heart-btn").forEach((btn) => {
+      if (btn.dataset.kaPlusHeartBusy === "1") return;
+      const adId = btn.dataset.adid;
+      if (!adId) return;
+      setHeartButtonState(btn, isAdKnownOnWatchlist(adId));
+    });
+  }
+
+  function ensureServerWatchlistSynced() {
+    if (watchlistServerSyncInFlight) return watchlistServerSyncInFlight;
+    if (Date.now() - watchlistServerSyncedAt < WATCHLIST_SERVER_SYNC_COOLDOWN_MS) return null;
+    watchlistServerSyncInFlight = fetchServerWatchlistIds()
+      .then((serverIds) => {
+        watchlistServerSyncedAt = Date.now();
+        if (serverIds && mergeKnownWatchlistIds(serverIds)) {
+          refreshSearchWatchlistHeartButtons();
+        }
+      })
+      .finally(() => {
+        watchlistServerSyncInFlight = null;
+      });
+    return watchlistServerSyncInFlight;
+  }
+
+  function enhanceSearchCardsWithWatchlistHeart() {
+    if (!isSearchPage()) return;
+    if (loadSettings().searchWatchlistHeartEnabled === false) return;
+    ensureServerWatchlistSynced();
+    const cards = collectSearchListingCards();
+    cards.forEach((card) => {
+      if (card.dataset.kaPlusHeart === "1") return;
+      const link = card.querySelector('a[href*="/s-anzeige/"]');
+      const img = firstListingImage(card);
+      if (!link || !img || !card.contains(img)) return;
+      const adId = card.dataset.adid || parseAdIdFromHref(link.getAttribute("href") || "");
+      if (!adId) return;
+
+      card.dataset.kaPlusHeart = "1";
+      const wrap = img.parentElement;
+      if (!wrap) return;
+      if (window.getComputedStyle(wrap).position === "static") wrap.style.position = "relative";
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ka-plus-watchlist-heart-btn";
+      btn.dataset.adid = adId;
+      setHeartButtonState(btn, isAdKnownOnWatchlist(adId));
+      Object.assign(btn.style, {
+        position: "absolute",
+        right: "8px",
+        top: "8px",
+        transform: "none",
+        width: "40px",
+        height: "40px",
+        minWidth: "40px",
+        minHeight: "40px",
+        aspectRatio: "1 / 1",
+        boxSizing: "border-box",
+        borderRadius: "50%",
+        border: "none",
+        background: "rgba(0,0,0,0.55)",
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+        zIndex: "5",
+        padding: "0",
+        lineHeight: "0",
+        transition: "opacity 0.15s ease",
+      });
+
+      btn.addEventListener(
+        "click",
+        (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          onSearchCardHeartClick(btn, adId);
+        },
+        true
+      );
+
+      wrap.appendChild(btn);
+    });
+  }
+
+  function syncSearchWatchlistHeartUi() {
+    if (!isSearchPage()) return;
+    const enabled = loadSettings().searchWatchlistHeartEnabled !== false;
+    if (!enabled) {
+      document.querySelectorAll(".ka-plus-watchlist-heart-btn").forEach((btn) => btn.remove());
+      document.querySelectorAll("[data-ka-plus-heart='1']").forEach((card) => {
+        delete card.dataset.kaPlusHeart;
+      });
+      return;
+    }
+    enhanceSearchCardsWithWatchlistHeart();
   }
 
   const TOP_BADGE_PURPLE = "#5A33AE";
@@ -3255,6 +3537,7 @@
     ".ka-plus-watchlist-extras",
     ".ka-plus-watchlist-card-wrap",
     ".ka-plus-lupe-btn",
+    ".ka-plus-watchlist-heart-btn",
   ];
 
   function nodeIsInsideKaPlusUi(node) {
@@ -3286,6 +3569,7 @@
       renderNotesOnListingCards();
       renderWatchlistPriceBadges();
       syncLupeUi();
+      syncSearchWatchlistHeartUi();
       applyHideTopAdsStyle();
       applyImagePreload();
     }, 120);
@@ -3296,6 +3580,7 @@
     renderNotesOnListingCards();
     renderWatchlistPriceBadges();
     syncLupeUi();
+    syncSearchWatchlistHeartUi();
     applyHideTopAdsStyle();
     applyImagePreload();
   }
@@ -3619,6 +3904,12 @@
           </div>
           <div class="ka-row">
             <label>
+              <input id="ka-search-watchlist-heart-enabled" type="checkbox" ${settings.searchWatchlistHeartEnabled !== false ? "checked" : ""}>
+              Merken-Herz auf Kartenbildern anzeigen
+            </label>
+          </div>
+          <div class="ka-row">
+            <label>
               <input id="ka-hide-top-ads" type="checkbox" ${settings.hideTopAdsEnabled === true ? "checked" : ""}>
               TOP-Anzeigen ausblenden
             </label>
@@ -3666,6 +3957,7 @@
     const watchlistPriceReAddPromptInput = root.querySelector("#ka-watchlist-price-readd-prompt");
     const watchlistPriceReAddModeInput = root.querySelector("#ka-watchlist-price-readd-mode");
     const lupeEnabledInput = root.querySelector("#ka-lupe-enabled");
+    const searchWatchlistHeartEnabledInput = root.querySelector("#ka-search-watchlist-heart-enabled");
     const hideTopAdsInput = root.querySelector("#ka-hide-top-ads");
     const imagePreloadEnabledInput = root.querySelector("#ka-image-preload-enabled");
     const imagePreloadSub = root.querySelector("#ka-image-preload-sub");
@@ -3759,6 +4051,12 @@
     lupeEnabledInput.addEventListener("change", () => {
       const next = loadSettings();
       next.lupeEnabled = lupeEnabledInput.checked;
+      saveSettings(next);
+      applyUiSettingsNow();
+    });
+    searchWatchlistHeartEnabledInput?.addEventListener("change", () => {
+      const next = loadSettings();
+      next.searchWatchlistHeartEnabled = searchWatchlistHeartEnabledInput.checked;
       saveSettings(next);
       applyUiSettingsNow();
     });

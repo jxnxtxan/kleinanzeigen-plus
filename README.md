@@ -10,6 +10,7 @@ Userscript fuer `kleinanzeigen.de` mit einer kleinen Tools-Oberflaeche, automati
 - **Anzeige (`/s-anzeige/…`)**: Notizen (Speichern/Löschen, eigener Speicher `kaPlusNotesV1`), **Als PDF speichern** (direkter Download via eingebetteter [html2pdf.js](https://github.com/eKoopmans/html2pdf.js), `@require` im Script)
 - **Bilder vorab laden**: Galeriebilder der Anzeige werden im Voraus geladen (statt erst beim Weiterklicken); Anzahl einstellbar (`0` = alle, zusätzlich ein Bild rückwärts)
 - **Suche**: gelbe Lupen-Schaltfläche auf Kartenbildern, Lightbox mit größtmöglicher Bild-URL
+- **Suche**: Herz-Schaltfläche auf Kartenbildern zum direkten Merken/Entfernen aus der Merkliste, ohne die Anzeige zu öffnen
 - Auto-Update ueber Tampermonkey/Violentmonkey
 
 ## Installation
@@ -26,6 +27,7 @@ Userscript fuer `kleinanzeigen.de` mit einer kleinen Tools-Oberflaeche, automati
 3. Sortier-Automatik und gewuenschte Sortierung einstellen.
 4. Auf einer Anzeigenseite: Block **MEINE NOTIZEN** unter dem Kontaktbereich; PDF-Button fuer Archiv-Export.
 5. In Suchergebnissen: gelbe **Lupe** auf dem Vorschaubild antippen.
+6. In Suchergebnissen: **Herz** oben rechts auf dem Vorschaubild antippen, um die Anzeige zur Merkliste hinzuzufügen bzw. zu entfernen.
 
 ## Update
 
