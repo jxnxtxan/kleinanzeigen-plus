@@ -1,22 +1,44 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.76
+// @version      1.2.84
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Merken-Herz direkt in der Trefferliste, Galerie-Bilder vorab laden, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
+// @icon         https://www.kleinanzeigen.de/favicon.ico
 // @homepageURL  https://github.com/jxnxtxan/kleinanzeigen-plus
 // @supportURL   https://github.com/jxnxtxan/kleinanzeigen-plus/issues
 // @updateURL    https://raw.githubusercontent.com/jxnxtxan/kleinanzeigen-plus/main/kleinazeigen-plus.js
 // @downloadURL  https://raw.githubusercontent.com/jxnxtxan/kleinanzeigen-plus/main/kleinazeigen-plus.js
 // @run-at       document-idle
 // @grant        none
-// @require      https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @connect      cdnjs.cloudflare.com
 // ==/UserScript==
 
 (function () {
   "use strict";
+
+  /* ---------------------------------------------------------------------------
+   * Inhaltsübersicht (grobe Orientierung, kein Build-Schritt/Module – zum
+   * Auffinden per Suche nach dem jeweils ersten genannten Funktionsnamen):
+   *
+   * - Settings-Storage & Cache .......... loadSettings / saveSettings
+   * - Seiten-/URL-Erkennung .............. isDetailPage / isSearchPage / isWatchlistPage
+   * - Sortierung ......................... applyPreferredSort
+   * - Notizen & Merklisten-Preis-Logik ... loadNoteForAd / saveWatchlistPriceForAd
+   * - Anzeigenseite: DOM-Scraping-Helper . getAdTitleText / parseSellerInfo / getDetailRows
+   * - Galerie-URL-Helfer ................. bestUrlFromSrcset / upgradeKleinanzeigenImageUrl
+   * - PDF-Export (jsPDF, hand-gelayoutet)  runPdfExport / exportPdfWithJsPdfFallback
+   * - Anzeigenseite: Notizen/PDF-Block ... injectAdNotesAndPdf
+   * - Bild-Lupe (Lightbox) ............... ensureLightbox / openLightbox
+   * - Merkliste: Preis-Badge & Notiz-Karte renderWatchlistPriceBadges / renderNotesOnListingCards
+   * - Suchseite: Lupe- & Herz-Buttons .... enhanceSearchCards / enhanceSearchCardsWithWatchlistHeart
+   * - TOP-Anzeigen ausblenden ............ applyHideTopAdsStyle
+   * - Bild-Vorladen (Anzeigenseite) ...... applyImagePreload
+   * - Refresh-Orchestrierung ............. scheduleKaPlusRefresh / applyUiSettingsNow
+   * - Settings-Panel (Tools-Button/UI) ... createPanel
+   * - Bootstrapping ...................... setupObservers + Aufrufe am Dateiende
+   * ------------------------------------------------------------------------- */
 
   const STORAGE_KEY = "kaEnhancedSettings";
   const NOTES_STORAGE_KEY = "kaPlusNotesV1";
@@ -72,10 +94,7 @@
     ],
   };
 
-  const PDF_PAGE_WIDTH_PX = 794;
   const PDF_IMAGE_MAX = 20;
-  const PDF_IMAGE_MAX_HEIGHT_CSS = 520;
-  const PDF_IMAGE_JPEG_QUALITY = 0.82;
   const KA_PLUS_JSPDF_CDN_PRIMARY = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
   const KA_PLUS_JSPDF_CDN_FALLBACK = "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js";
 
@@ -256,7 +275,15 @@
     saveKnownWatchlistIds(set);
   }
 
-  function loadSettings() {
+  /**
+   * In-Memory-Cache für loadSettings(): wird sehr häufig aufgerufen (u. a. im globalen
+   * MutationObserver-Callback bei jeder DOM-Änderung der Seite), daher lohnt sich das
+   * Vermeiden von wiederholtem JSON.parse. Invalidiert durch saveSettings() (dieser Tab)
+   * und durch das "storage"-Event (Änderung in einem anderen Tab).
+   */
+  let settingsCache = null;
+
+  function readSettingsFromStorage() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return { ...DEFAULT_SETTINGS };
@@ -292,9 +319,19 @@
     }
   }
 
+  function loadSettings() {
+    if (!settingsCache) settingsCache = readSettingsFromStorage();
+    return { ...settingsCache };
+  }
+
   function saveSettings(next) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    settingsCache = { ...next };
   }
+
+  window.addEventListener("storage", (ev) => {
+    if (ev.key === STORAGE_KEY) settingsCache = null;
+  });
 
   function normalizeText(value) {
     return String(value || "")
@@ -485,10 +522,17 @@
   }
 
   /**
-   * Liegt der Button in einer horizontalen Flex-Zeile, wäre insertAdjacentElement(afterend)
-   * ein zweites Spalten-Element. Dann Karte unter der ganzen Zeile einfügen (nach dem Row-Container).
+   * Bevorzugt den stabilen kleinanzeigen.de-Container #viewad-user-actions (enthält Kaufen-/
+   * Nachricht-/Merkliste-/Teilen-Buttons) als Anker, direkt danach kommt sonst das Profil.
+   * Ohne diesen Container (Markup-Änderung) Fallback auf die alte Heuristik: liegt der Button
+   * in einer horizontalen Flex-Zeile, wäre insertAdjacentElement(afterend) ein zweites
+   * Spalten-Element – dann Karte unter der ganzen Zeile einfügen (nach dem Row-Container).
+   * Cave: diese Heuristik kann bei verschachtelten Layout-Flex-Containern (z. B. der äußere
+   * Galerie+Sidebar-Wrapper) zu weit nach oben klettern – daher nur letzter Ausweg.
    */
   function findInsertionAnchorAfterButton(btn) {
+    const stableAnchor = btn.closest("#viewad-user-actions");
+    if (stableAnchor) return stableAnchor;
     let el = btn.parentElement;
     while (el && el !== document.body) {
       const cs = window.getComputedStyle(el);
@@ -1398,60 +1442,9 @@
     return urls.slice(0, 48);
   }
 
-  function buildPdfInnerHtml(data) {
-    const rowsHtml = data.detailRows
-      .map((r) => `<tr><td colspan="2" style="padding:4px 0;border-bottom:1px solid #eee;">${escapeHtml(r)}</td></tr>`)
-      .join("");
-    const imgs = data.imageUrls.slice(0, PDF_IMAGE_MAX);
-    const imgBlocks = imgs
-      .map(
-        (url, i) => `
-      <div style="margin:12px 0;page-break-inside:avoid;">
-        <div style="font-size:11px;color:#666;margin-bottom:4px;">${i + 1} / ${imgs.length}</div>
-        <img crossorigin="anonymous" src="${escapeHtml(url)}" style="max-width:100%;max-height:${PDF_IMAGE_MAX_HEIGHT_CSS}px;height:auto;display:block;border:1px solid #ddd;border-radius:4px;" alt="" />
-      </div>`
-      )
-      .join("");
-    const exportLine = new Date().toLocaleString("de-DE");
-    return `
-      <div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#111;line-height:1.45;">
-        <h1 style="font-size:20px;margin:0 0 8px;">${escapeHtml(data.title)}</h1>
-        <p style="margin:4px 0;"><strong>Anzeigen-ID</strong> ${escapeHtml(data.adId)}</p>
-        <p style="margin:4px 0;"><strong>Preis</strong> ${escapeHtml(data.price)}</p>
-        <p style="margin:4px 0;"><strong>Ort</strong> ${escapeHtml(data.location)}</p>
-        <p style="margin:4px 0;"><strong>Eingestellt</strong> ${escapeHtml(data.postedDate)}</p>
-        <p style="margin:4px 0;"><strong>Aufrufe</strong> ${escapeHtml(data.viewCount)}</p>
-        <p style="margin:4px 0;"><strong>Kategorie</strong> ${escapeHtml(data.category)}</p>
-        <p style="margin:4px 0;word-break:break-all;"><strong>URL</strong> ${escapeHtml(data.url)}</p>
-        <h2 style="font-size:15px;margin:16px 0 6px;">Verkäufer</h2>
-        <p style="margin:4px 0;"><strong>Name</strong> ${escapeHtml(data.sellerName)}</p>
-        <p style="margin:4px 0;"><strong>Nutzer-ID</strong> ${escapeHtml(data.sellerUserId)}</p>
-        <p style="margin:4px 0;"><strong>Typ</strong> ${escapeHtml(data.sellerType)}</p>
-        <p style="margin:4px 0;"><strong>Aktiv seit</strong> ${escapeHtml(data.sellerActiveSince)}</p>
-        <h2 style="font-size:15px;margin:16px 0 6px;">Details</h2>
-        <table style="width:100%;border-collapse:collapse;">${rowsHtml || `<tr><td>${escapeHtml("(Keine strukturierten Merkmale gefunden)")}</td></tr>`}</table>
-        ${
-          data.equipmentText
-            ? `<h2 style="font-size:15px;margin:16px 0 6px;">Ausstattung</h2>
-        <p style="margin:4px 0;white-space:pre-wrap;">${escapeHtml(data.equipmentText)}</p>`
-            : ""
-        }
-        <h2 style="font-size:15px;margin:16px 0 6px;">Beschreibung</h2>
-        <p style="margin:4px 0;white-space:pre-wrap;">${escapeHtml(data.description)}</p>
-        <h2 style="font-size:15px;margin:16px 0 6px;">Bilder (${imgs.length})</h2>
-        ${imgBlocks || `<p>${escapeHtml("(Keine Bilder erkannt)")}</p>`}
-        <hr style="margin:20px 0;border:none;border-top:1px solid #ccc;" />
-        <p style="font-size:10px;color:#555;">Exportiert am: ${escapeHtml(exportLine)}</p>
-        <p style="font-size:10px;color:#555;">Quelle: kleinanzeigen.de • PDF erstellt mit: Kleinanzeigen Plus</p>
-        <p style="font-size:10px;color:#555;">Hinweis: Dieses PDF wurde automatisch von Kleinanzeigen Plus erstellt und dient ausschließlich der persönlichen Dokumentation. Kleinanzeigen Plus ist nicht verantwortlich für den Inhalt der Anzeige. Alle Rechte am Inhalt (Texte, Bilder) verbleiben beim jeweiligen Ersteller bzw. Rechteinhaber. Eine Weiterverbreitung oder kommerzielle Nutzung ist ohne ausdrückliche Genehmigung nicht gestattet.</p>
-      </div>
-    `;
-  }
-
   function logPdfRuntime(stage, extra = {}) {
     const snapshot = {
       stage,
-      hasHtml2Pdf: typeof globalThis.html2pdf,
       hasJspdfNamespace: typeof globalThis.jspdf,
       hasJspdfCtor: typeof globalThis.jspdf?.jsPDF,
       hasGlobalJsPdfCtor: typeof globalThis.jsPDF,
@@ -1536,7 +1529,25 @@
     return null;
   }
 
-  async function exportPdfWithJsPdfFallback(data, filename) {
+  /**
+   * Wiederverwendete Design-Werte für den PDF-Export (RGB-Arrays für doc.setTextColor(),
+   * Schriftgrößen/Zeilenabstände in mm/pt). Zentral benannt, damit an mehreren Stellen
+   * gleich gemeinte Werte (z. B. „gedämpfter Hinweistext") nicht unbemerkt divergieren.
+   */
+  const PDF_COLOR_TEXT_DEFAULT = [22, 25, 33];
+  const PDF_COLOR_SECTION_HEAD = [26, 31, 43];
+  const PDF_COLOR_MUTED = [98, 107, 121];
+  const PDF_COLOR_BODY = [28, 33, 44];
+  const PDF_COLOR_FOOTNOTE = [112, 120, 134];
+  const PDF_FONT_BODY = 10.6;
+  const PDF_FONT_BODY_LARGE = 11.2;
+  const PDF_FONT_EMPTY_STATE = 10.2;
+  const PDF_FONT_SECTION_HEAD = 13.6;
+  const PDF_FONT_MISSING_IMAGE = 8.2;
+  const PDF_GAP_BODY = 4.8;
+  const PDF_GAP_KEY_VALUE = 5.4;
+
+  async function exportPdfWithJsPdfFallback(data, filename, onProgress) {
     const Ctor = await ensureJsPdfAvailable();
     const doc = new Ctor({ unit: "mm", format: "a4", orientation: "portrait" });
     const pageW = doc.internal.pageSize.getWidth();
@@ -1572,7 +1583,7 @@
       doc.addPage();
       y = margin;
     };
-    const writeLine = (text, size = 10.6, bold = false, gap = 5.1, color = [22, 25, 33]) => {
+    const writeLine = (text, size = PDF_FONT_BODY, bold = false, gap = 5.1, color = PDF_COLOR_TEXT_DEFAULT) => {
       ensureRoom(gap + 1);
       doc.setTextColor(color[0], color[1], color[2]);
       doc.setFont("helvetica", bold ? "bold" : "normal");
@@ -1580,7 +1591,7 @@
       doc.text(String(text || ""), margin, y);
       y += gap;
     };
-    const writeWrapped = (text, size = 10.6, bold = false, gap = 4.9, color = [22, 25, 33]) => {
+    const writeWrapped = (text, size = PDF_FONT_BODY, bold = false, gap = 4.9, color = PDF_COLOR_TEXT_DEFAULT) => {
       doc.setTextColor(color[0], color[1], color[2]);
       doc.setFont("helvetica", bold ? "bold" : "normal");
       doc.setFontSize(size);
@@ -1597,18 +1608,18 @@
       doc.setDrawColor(233, 237, 244);
       doc.setLineWidth(0.35);
       doc.line(margin, y - 6.2, pageW - margin, y - 6.2);
-      writeLine(label, 13.6, true, 6.4, [26, 31, 43]);
+      writeLine(label, PDF_FONT_SECTION_HEAD, true, 6.4, PDF_COLOR_SECTION_HEAD);
     };
     const writeKeyValue = (label, value) => {
       doc.setFont("helvetica", "normal");
       doc.setFontSize(11);
-      doc.setTextColor(98, 107, 121);
-      ensureRoom(5.4);
+      doc.setTextColor(...PDF_COLOR_MUTED);
+      ensureRoom(PDF_GAP_KEY_VALUE);
       doc.text(String(label || "-"), margin, y);
       doc.setFont("helvetica", "bold");
       doc.setTextColor(25, 29, 37);
       doc.text(String(value || "-"), margin + 42, y);
-      y += 5.4;
+      y += PDF_GAP_KEY_VALUE;
     };
 
     doc.setFont("helvetica", "bold");
@@ -1629,8 +1640,8 @@
     writeKeyValue("Kategorie", data.category);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(11);
-    doc.setTextColor(98, 107, 121);
-    ensureRoom(5.4);
+    doc.setTextColor(...PDF_COLOR_MUTED);
+    ensureRoom(PDF_GAP_KEY_VALUE);
     doc.text("URL", margin, y);
     const urlHrefRaw = String(data.url || "").trim();
     doc.setFont("helvetica", "normal");
@@ -1660,7 +1671,7 @@
       y += urlLineGapMm;
     });
 
-    const sellerBodyMm = 4 * 5.4;
+    const sellerBodyMm = 4 * PDF_GAP_KEY_VALUE;
     avoidSmallTailOnPage(PDF_SECTION_HEAD_MM + sellerBodyMm);
     section("Verkäufer");
     writeKeyValue("Name", data.sellerName);
@@ -1669,42 +1680,42 @@
     writeKeyValue("Aktiv seit", data.sellerActiveSince);
 
     const details = Array.isArray(data.detailRows) ? data.detailRows : [];
-    let detailsBodyMm = details.length ? 0 : 4.8;
-    doc.setFontSize(10.6);
+    let detailsBodyMm = details.length ? 0 : PDF_GAP_BODY;
+    doc.setFontSize(PDF_FONT_BODY);
     details.forEach((row) => {
       const m = String(row || "").match(/^([^:]+?)\s+(.+)$/);
-      if (m) detailsBodyMm += 5.4;
-      else detailsBodyMm += estimateWrappedLinesHeight(10.6, 4.8, contentW, row);
+      if (m) detailsBodyMm += PDF_GAP_KEY_VALUE;
+      else detailsBodyMm += estimateWrappedLinesHeight(PDF_FONT_BODY, PDF_GAP_BODY, contentW, row);
     });
     avoidSmallTailOnPage(PDF_SECTION_HEAD_MM + detailsBodyMm);
     section("Details");
     if (!details.length)
-      writeLine("(Keine strukturierten Merkmale gefunden)", 10.2, false, 4.8, [98, 107, 121]);
+      writeLine("(Keine strukturierten Merkmale gefunden)", PDF_FONT_EMPTY_STATE, false, PDF_GAP_BODY, PDF_COLOR_MUTED);
     details.forEach((row) => {
       const m = String(row || "").match(/^([^:]+?)\s+(.+)$/);
       if (m) {
         writeKeyValue(m[1], m[2]);
       } else {
-        writeWrapped(row, 10.6, false, 4.8);
+        writeWrapped(row, PDF_FONT_BODY, false, PDF_GAP_BODY);
       }
     });
 
     const equipmentText = String(data.equipmentText || "").trim();
     if (equipmentText) {
-      const equipBodyMm = estimateWrappedLinesHeight(11.2, 5.2, contentW, equipmentText);
+      const equipBodyMm = estimateWrappedLinesHeight(PDF_FONT_BODY_LARGE, 5.2, contentW, equipmentText);
       avoidSmallTailOnPage(PDF_SECTION_HEAD_MM + equipBodyMm);
       section("Ausstattung");
-      writeWrapped(equipmentText, 11.2, false, 5.2, [28, 33, 44]);
+      writeWrapped(equipmentText, PDF_FONT_BODY_LARGE, false, 5.2, PDF_COLOR_BODY);
     }
 
     const descText = data.description || "(Keine Beschreibung)";
-    const descBodyMm = estimateWrappedLinesHeight(11.2, 5.35, contentW, descText);
+    const descBodyMm = estimateWrappedLinesHeight(PDF_FONT_BODY_LARGE, 5.35, contentW, descText);
     avoidSmallTailOnPage(PDF_SECTION_HEAD_MM + descBodyMm);
     section("Beschreibung");
-    writeWrapped(descText, 11.2, false, 5.35, [28, 33, 44]);
+    writeWrapped(descText, PDF_FONT_BODY_LARGE, false, 5.35, PDF_COLOR_BODY);
 
     const images = Array.isArray(data.imageUrls) ? data.imageUrls : [];
-    if (!images.length) writeLine("(Keine Bilder erkannt)", 10.2, false, 4.8, [98, 107, 121]);
+    if (!images.length) writeLine("(Keine Bilder erkannt)", PDF_FONT_EMPTY_STATE, false, PDF_GAP_BODY, PDF_COLOR_MUTED);
     let embeddedCount = 0;
     const total = Math.min(images.length, PDF_IMAGE_MAX);
     const perPage = 6;
@@ -1716,8 +1727,8 @@
       doc.addPage();
       y = margin;
       doc.setFont("helvetica", "bold");
-      doc.setFontSize(13.6);
-      doc.setTextColor(26, 31, 43);
+      doc.setFontSize(PDF_FONT_SECTION_HEAD);
+      doc.setTextColor(...PDF_COLOR_SECTION_HEAD);
       doc.text(`Bilder (${images.length})`, margin, y + 2);
       const chunk = images.slice(idx, idx + perPage);
       for (let j = 0; j < chunk.length; j += 1) {
@@ -1728,16 +1739,17 @@
         const x = margin + col * (cellW + gridGap);
         const top = margin + 8 + row * (cellH + 10);
         doc.setFont("helvetica", "bold");
-        doc.setFontSize(11.2);
+        doc.setFontSize(PDF_FONT_BODY_LARGE);
         doc.setTextColor(44, 51, 66);
         doc.text(`${absoluteIndex + 1} / ${images.length}`, x, top + 3.2);
 
         const imageTop = top + 6;
+        onProgress?.(absoluteIndex + 1, total);
         const loaded = await fetchImageAsDataUrl(url);
         if (!loaded) {
           doc.setFont("helvetica", "normal");
-          doc.setFontSize(8.2);
-          doc.setTextColor(112, 120, 134);
+          doc.setFontSize(PDF_FONT_MISSING_IMAGE);
+          doc.setTextColor(...PDF_COLOR_FOOTNOTE);
           const missing = doc.splitTextToSize(String(url || ""), cellW - 4);
           missing.slice(0, 4).forEach((line, lineIdx) => {
             doc.text(String(line), x + 2, imageTop + 6 + lineIdx * 3.8);
@@ -1758,8 +1770,8 @@
           embeddedCount += 1;
         } catch {
           doc.setFont("helvetica", "normal");
-          doc.setFontSize(8.2);
-          doc.setTextColor(112, 120, 134);
+          doc.setFontSize(PDF_FONT_MISSING_IMAGE);
+          doc.setTextColor(...PDF_COLOR_FOOTNOTE);
           doc.text("Bild konnte nicht eingebettet werden.", x + 2, imageTop + 6);
         }
       }
@@ -1784,7 +1796,7 @@
     /** Footer möglichst auf der zuletzt befüllten Seite; nur bei Kollision neue Seite. */
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8.8);
-    doc.setTextColor(112, 120, 134);
+    doc.setTextColor(...PDF_COLOR_FOOTNOTE);
     const hint =
       "Hinweis: Dieses PDF wurde automatisch von Kleinanzeigen Plus erstellt und dient ausschließlich der persönlichen Dokumentation. Kleinanzeigen Plus ist nicht verantwortlich für den Inhalt der Anzeige. Alle Rechte am Inhalt (Texte, Bilder) verbleiben beim jeweiligen Ersteller bzw. Rechteinhaber. Eine Weiterverbreitung oder kommerzielle Nutzung ist ohne ausdrückliche Genehmigung nicht gestattet.";
     const hintLinesFull = doc.splitTextToSize(hint, contentW);
@@ -1836,7 +1848,33 @@
     window.setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
 
-  function runPdfExport(adId) {
+  const PDF_BUTTON_IDLE_LABEL = "Als PDF speichern";
+
+  function setPdfButtonState(btn, { busy, label }) {
+    if (!btn) return;
+    const spinner = btn.querySelector(".ka-plus-pdf-spinner");
+    const labelEl = btn.querySelector("#ka-plus-pdf-btn-label");
+    btn.disabled = !!busy;
+    if (spinner) spinner.hidden = !busy;
+    if (labelEl && label) labelEl.textContent = label;
+  }
+
+  /**
+   * Einzige Quelle der Wahrheit für "läuft gerade ein PDF-Export für diese Anzeige".
+   * Bewusst nicht am Button-DOM-Knoten festgemacht (z. B. via dataset), weil
+   * injectAdNotesAndPdf() den Notizen/PDF-Block bei Settings-Änderungen komplett neu
+   * aufbaut – ein DOM-gebundenes Flag würde dabei verloren gehen und die Sperre aushebeln.
+   */
+  let pdfExportBusyForAdId = null;
+
+  function isPdfExportBusyForAd(adId) {
+    return pdfExportBusyForAdId !== null && pdfExportBusyForAdId === adId;
+  }
+
+  function runPdfExport(adId, btn) {
+    if (isPdfExportBusyForAd(adId)) return;
+    pdfExportBusyForAdId = adId;
+    setPdfButtonState(btn, { busy: true, label: "Wird erstellt…" });
     logPdfRuntime("runPdfExport-start");
     const title = getAdTitleText() || "Anzeige";
     const seller = parseSellerInfo();
@@ -1861,6 +1899,11 @@
       imageUrls: collectGalleryImageUrls(),
     };
     const filename = `Kleinanzeigen_${data.adId || "export"}.pdf`;
+    const onProgress = (current, total) => {
+      if (total > 0) {
+        setPdfButtonState(btn, { busy: true, label: `Bilder werden geladen (${current}/${total})` });
+      }
+    };
     Promise.resolve()
       .then(() => {
         logPdfRuntime("before-jspdf-export", {
@@ -1869,11 +1912,19 @@
           detailCount: Array.isArray(data.detailRows) ? data.detailRows.length : -1,
           imageCount: Array.isArray(data.imageUrls) ? data.imageUrls.length : -1,
         });
-        return exportPdfWithJsPdfFallback(data, filename);
+        return exportPdfWithJsPdfFallback(data, filename, onProgress);
+      })
+      .then(() => {
+        setPdfButtonState(btn, { busy: true, label: "Fertig ✓" });
+        return new Promise((resolve) => window.setTimeout(resolve, 1100));
       })
       .catch((err) => {
         console.error("[Kleinanzeigen Plus] PDF export failed:", err);
         window.alert("PDF konnte nicht erzeugt werden.");
+      })
+      .finally(() => {
+        pdfExportBusyForAdId = null;
+        setPdfButtonState(btn, { busy: false, label: PDF_BUTTON_IDLE_LABEL });
       });
   }
 
@@ -1931,11 +1982,17 @@
 
     const existing = document.getElementById("ka-plus-ad-tools");
     if (existing) {
+      const sameAd = existing.dataset.kaPlusAdId === adId;
+      if (sameAd && isPdfExportBusyForAd(adId)) {
+        // Block während eines laufenden PDF-Exports nicht neu aufbauen/entfernen –
+        // sonst geht der Busy-Button samt Fortschrittsanzeige verloren (siehe
+        // pdfExportBusyForAdId weiter oben).
+        return;
+      }
       if (!anyAdDetailTool) {
         existing.remove();
         return;
       }
-      const sameAd = existing.dataset.kaPlusAdId === adId;
       const sameLayout =
         Boolean(existing.dataset.kaPlusLayoutKey) && existing.dataset.kaPlusLayoutKey === layoutKey;
       if (sameAd && sameLayout) {
@@ -1954,6 +2011,11 @@
 
     const insertion = findAdNotesInsertionPoint();
     const insertParent = document.querySelector("#viewad-main") || document.body;
+    if (!insertion?.node) {
+      console.warn(
+        "[Kleinanzeigen Plus] Notizen/PDF-Block: kein Ankerpunkt (Anzeige teilen/Merkliste-Button) gefunden – hänge stattdessen an #viewad-main/body an. Hat kleinanzeigen.de das Markup geändert?"
+      );
+    }
 
     const root = document.createElement("div");
     root.id = "ka-plus-ad-tools";
@@ -2044,6 +2106,25 @@
           justify-content: center;
           text-align: center;
           line-height: 1.2;
+          gap: 8px;
+        }
+        #ka-plus-ad-tools .ka-plus-btn-pdf:disabled {
+          cursor: default;
+          opacity: 0.85;
+        }
+        #ka-plus-ad-tools .ka-plus-pdf-spinner {
+          width: 15px;
+          height: 15px;
+          border-radius: 50%;
+          border: 2px solid rgba(17, 17, 17, 0.25);
+          border-top-color: #111;
+          animation: ka-plus-pdf-spin 0.7s linear infinite;
+          flex: none;
+        }
+        @keyframes ka-plus-pdf-spin {
+          to {
+            transform: rotate(360deg);
+          }
         }
         #ka-plus-ad-tools .ka-plus-notes-footer {
           margin: var(--ka-plus-card-pad) 0 0;
@@ -2107,7 +2188,14 @@
       `
           : ""
       }
-      ${pdfEnabled ? `<button type="button" class="ka-plus-btn-pdf" id="ka-plus-pdf-btn">Als PDF speichern</button>` : ""}
+      ${
+        pdfEnabled
+          ? `<button type="button" class="ka-plus-btn-pdf" id="ka-plus-pdf-btn">
+               <span class="ka-plus-pdf-spinner" id="ka-plus-pdf-spinner" hidden></span>
+               <span id="ka-plus-pdf-btn-label">${PDF_BUTTON_IDLE_LABEL}</span>
+             </button>`
+          : ""
+      }
       ${priceBlockHtml}
       <p class="ka-plus-notes-footer">Kleinanzeigen Plus</p>
     `;
@@ -2129,7 +2217,9 @@
         persistNoteForAd(adId, "");
       });
     }
-    root.querySelector("#ka-plus-pdf-btn")?.addEventListener("click", () => runPdfExport(adId));
+    root.querySelector("#ka-plus-pdf-btn")?.addEventListener("click", (ev) => {
+      runPdfExport(adId, ev.currentTarget);
+    });
   }
 
   function abortKaPlusLightboxFetch(lb) {
@@ -3331,21 +3421,32 @@
     });
   }
 
-  function collectTopAdListItems() {
-    const items = new Set();
+  function collectSearchAdListItems() {
     const root =
       document.getElementById("srchrslt-adtable") ||
       document.getElementById("srchrslt-results");
     if (!root) return [];
 
-    root
-      .querySelectorAll("li.ad-listitem.is-topad, li.ad-listitem.badge-topad")
-      .forEach((li) => items.add(li));
+    let items = Array.from(root.querySelectorAll('li[data-clickable="card"]'));
+    if (!items.length) {
+      items = Array.from(root.querySelectorAll("article"))
+        .map((article) => article.closest("li"))
+        .filter((li, i, arr) => li && arr.indexOf(li) === i);
+    }
+    return items;
+  }
 
-    root.querySelectorAll("li.ad-listitem svg").forEach((svg) => {
-      if (!isKaPlusTopBadgeSvg(svg)) return;
-      const li = svg.closest("li.ad-listitem");
-      if (li) items.add(li);
+  function collectTopAdListItems() {
+    const items = new Set();
+
+    collectSearchAdListItems().forEach((li) => {
+      if (li.classList.contains("is-topad") || li.classList.contains("badge-topad")) {
+        items.add(li);
+        return;
+      }
+      if (Array.from(li.querySelectorAll("svg")).some(isKaPlusTopBadgeSvg)) {
+        items.add(li);
+      }
     });
 
     return [...items];
@@ -3379,7 +3480,6 @@
 
   function ensureHideTopAdsStylesheet() {
     const css =
-      "html.ka-plus-hide-top-ads #srchrslt-results li.ad-listitem[data-ka-plus-top-hidden]," +
       "html.ka-plus-hide-top-ads li[data-ka-plus-top-hidden] { display: none !important; visibility: hidden !important; height: 0 !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; border: 0 !important; }";
     let el = document.getElementById("ka-plus-hide-top-ads-style");
     if (!el) {
@@ -3475,7 +3575,7 @@
 
   function runImagePreload() {
     const settings = loadSettings();
-    if (!settings.imagePreloadEnabled || !isAdDetailPage()) return;
+    if (!settings.imagePreloadEnabled || !isDetailPage()) return;
     const slides = getGallerySlides();
     if (!slides.length) return;
     const count = normalizeImagePreloadCount(settings.imagePreloadCount);
@@ -3501,7 +3601,7 @@
 
   function ensureGalleryPreloadObserver() {
     const settings = loadSettings();
-    if (!settings.imagePreloadEnabled || !isAdDetailPage()) {
+    if (!settings.imagePreloadEnabled || !isDetailPage()) {
       if (galleryPreloadObserver) {
         galleryPreloadObserver.disconnect();
         galleryPreloadObserver = null;
@@ -3585,6 +3685,9 @@
     applyImagePreload();
   }
 
+  /** Auf-/Zuklapp-Pfeil für die <summary>-Kategorietitel im Tools-Panel (Akkordeon). */
+  const KA_TOOLS_CHEVRON_SVG = `<svg class="ka-tools-chevron" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
   function createPanel() {
     if (document.getElementById("ka-enhanced-root")) return;
     const settings = loadSettings();
@@ -3607,7 +3710,6 @@
           height: 64px;
           padding: 6px 10px 4px;
           border: none;
-          border-radius: 8px;
           background: transparent;
           color: #1d4b00;
           font-size: 14px;
@@ -3619,15 +3721,15 @@
           align-items: center;
           justify-content: center;
           gap: 3px;
-          transition: background-color 0.15s ease, color 0.15s ease;
+          box-shadow: inset 0 -4px 0 0 transparent;
+          transition: box-shadow 0.15s ease, color 0.15s ease;
         }
         #ka-enhanced-open-btn:hover {
-          background: rgba(0, 0, 0, 0.08);
+          box-shadow: inset 0 -4px 0 0 #326916;
         }
         #ka-enhanced-open-btn:focus-visible {
           outline: none;
-          background: rgba(0, 0, 0, 0.12);
-          box-shadow: 0 0 0 2px rgba(17, 17, 17, 0.35);
+          box-shadow: inset 0 -4px 0 0 #326916, 0 0 0 2px rgba(17, 17, 17, 0.35);
         }
         #ka-enhanced-open-btn .ka-tools-icon {
           width: 18px;
@@ -3680,6 +3782,20 @@
         #ka-enhanced-panel h4 {
           margin: 0 0 10px;
           font-size: 14px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        #ka-enhanced-saved-hint {
+          font-size: 11px;
+          font-weight: 600;
+          color: #1d4b00;
+          opacity: 0;
+          transition: opacity 0.2s ease;
+        }
+        #ka-enhanced-saved-hint.visible {
+          opacity: 1;
         }
         .ka-tools-category {
           margin: 0 0 12px;
@@ -3698,6 +3814,30 @@
           letter-spacing: 0.06em;
           text-transform: uppercase;
           color: #666;
+          cursor: pointer;
+          list-style: none;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          user-select: none;
+        }
+        .ka-tools-category-title::-webkit-details-marker {
+          display: none;
+        }
+        .ka-tools-chevron {
+          display: inline-flex;
+          flex: none;
+          transition: transform 0.15s ease;
+        }
+        .ka-tools-category[open] > .ka-tools-category-title .ka-tools-chevron {
+          transform: rotate(180deg);
+        }
+        .ka-tools-category:not([open]) {
+          padding-bottom: 0;
+        }
+        .ka-tools-category:not([open]) .ka-tools-category-title {
+          margin-bottom: 0;
         }
         .ka-row {
           margin: 5px 0;
@@ -3804,10 +3944,10 @@
         <span class="ka-tools-label">Tools</span>
       </button>
       <div id="ka-enhanced-panel">
-        <h4>Kleinanzeigen Tools</h4>
+        <h4>Kleinanzeigen Tools<span id="ka-enhanced-saved-hint" role="status" aria-live="polite">Gespeichert ✓</span></h4>
 
-        <section class="ka-tools-category" aria-labelledby="ka-cat-sort">
-          <h5 class="ka-tools-category-title" id="ka-cat-sort">Sortierung</h5>
+        <details class="ka-tools-category" open>
+          <summary class="ka-tools-category-title">Sortierung${KA_TOOLS_CHEVRON_SVG}</summary>
           <div class="ka-row">
             <label>
               <input id="ka-sort-enabled" type="checkbox" ${settings.autoSortEnabled ? "checked" : ""}>
@@ -3825,10 +3965,10 @@
               ).join("")}
             </select>
           </div>
-        </section>
+        </details>
 
-        <section class="ka-tools-category" aria-labelledby="ka-cat-detail">
-          <h5 class="ka-tools-category-title" id="ka-cat-detail">Anzeigenseiten</h5>
+        <details class="ka-tools-category" open>
+          <summary class="ka-tools-category-title">Anzeigenseiten${KA_TOOLS_CHEVRON_SVG}</summary>
           <div class="ka-row">
             <label>
               <input id="ka-ad-detail-extras-master" type="checkbox" ${settings.adDetailExtrasEnabled !== false ? "checked" : ""}>
@@ -3849,10 +3989,10 @@
               </label>
             </div>
           </div>
-        </section>
+        </details>
 
-        <section class="ka-tools-category" aria-labelledby="ka-cat-watchlist">
-          <h5 class="ka-tools-category-title" id="ka-cat-watchlist">Merkliste</h5>
+        <details class="ka-tools-category" open>
+          <summary class="ka-tools-category-title">Merkliste${KA_TOOLS_CHEVRON_SVG}</summary>
           <div class="ka-tools-sub" id="ka-merkliste-sub">
             <div class="ka-row">
               <label>
@@ -3892,10 +4032,10 @@
               </select>
             </div>
           </div>
-        </section>
+        </details>
 
-        <section class="ka-tools-category" aria-labelledby="ka-cat-search">
-          <h5 class="ka-tools-category-title" id="ka-cat-search">Suche</h5>
+        <details class="ka-tools-category" open>
+          <summary class="ka-tools-category-title">Suche${KA_TOOLS_CHEVRON_SVG}</summary>
           <div class="ka-row">
             <label>
               <input id="ka-lupe-enabled" type="checkbox" ${settings.lupeEnabled !== false ? "checked" : ""}>
@@ -3914,10 +4054,10 @@
               TOP-Anzeigen ausblenden
             </label>
           </div>
-        </section>
+        </details>
 
-        <section class="ka-tools-category" aria-labelledby="ka-cat-images">
-          <h5 class="ka-tools-category-title" id="ka-cat-images">Bilder auf der Anzeigenseite</h5>
+        <details class="ka-tools-category" open>
+          <summary class="ka-tools-category-title">Bilder auf der Anzeigenseite${KA_TOOLS_CHEVRON_SVG}</summary>
           <div class="ka-row">
             <label>
               <input id="ka-image-preload-enabled" type="checkbox" ${settings.imagePreloadEnabled === true ? "checked" : ""}>
@@ -3931,7 +4071,7 @@
             </div>
             <p class="ka-tools-hint" id="ka-image-preload-hint"><strong>0</strong> = alle Bilder &middot; zusätzlich wird jeweils ein Bild rückwärts geladen</p>
           </div>
-        </section>
+        </details>
       </div>
     `;
 
@@ -3939,11 +4079,22 @@
     if (headerAnchor) {
       headerAnchor.insertAdjacentElement("afterend", root);
     } else {
+      console.warn(
+        "[Kleinanzeigen Plus] Tools-Button: „Meins“-Button im Header nicht gefunden – hänge Panel an document.body an. Hat kleinanzeigen.de das Markup geändert?"
+      );
       document.body.appendChild(root);
     }
 
     const openBtn = root.querySelector("#ka-enhanced-open-btn");
     const panel = root.querySelector("#ka-enhanced-panel");
+    const savedHint = root.querySelector("#ka-enhanced-saved-hint");
+    let savedHintTimer = null;
+    function showSavedFeedback() {
+      if (!savedHint) return;
+      savedHint.classList.add("visible");
+      clearTimeout(savedHintTimer);
+      savedHintTimer = window.setTimeout(() => savedHint.classList.remove("visible"), 1400);
+    }
     const enabledInput = root.querySelector("#ka-sort-enabled");
     const adDetailExtrasMasterInput = root.querySelector("#ka-ad-detail-extras-master");
     const adDetailExtrasSub = root.querySelector("#ka-ad-detail-extras-sub");
@@ -3986,20 +4137,34 @@
     }
     syncAdDetailExtrasSubgroupUi();
 
+    function closePanel() {
+      panel.classList.remove("open");
+    }
+
     openBtn.addEventListener("click", () => panel.classList.toggle("open"));
     document.addEventListener("click", (event) => {
-      if (!root.contains(event.target)) panel.classList.remove("open");
+      if (!root.contains(event.target)) closePanel();
+    });
+    // An root statt an panel, damit Escape auch direkt nach dem Öffnen per Klick auf
+    // openBtn greift (der Fokus bleibt dort, panel ist nur ein Geschwisterelement).
+    root.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      closePanel();
+      openBtn.focus();
     });
     enabledInput.addEventListener("change", () => {
       const next = loadSettings();
       next.autoSortEnabled = enabledInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       if (next.autoSortEnabled) applyPreferredSort();
     });
     adDetailExtrasMasterInput.addEventListener("change", () => {
       const next = loadSettings();
       next.adDetailExtrasEnabled = adDetailExtrasMasterInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       syncAdDetailExtrasSubgroupUi();
       applyUiSettingsNow();
     });
@@ -4007,69 +4172,81 @@
       const next = loadSettings();
       next.notesEnabled = notesEnabledInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       applyUiSettingsNow();
     });
     watchlistNotesEnabledInput.addEventListener("change", () => {
       const next = loadSettings();
       next.watchlistNotesEnabled = watchlistNotesEnabledInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       applyUiSettingsNow();
     });
     pdfEnabledInput.addEventListener("change", () => {
       const next = loadSettings();
       next.pdfEnabled = pdfEnabledInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       applyUiSettingsNow();
     });
     watchlistPriceSaveInput?.addEventListener("change", () => {
       const next = loadSettings();
       next.watchlistPriceSaveEnabled = watchlistPriceSaveInput.checked;
       saveSettings(next);
+      showSavedFeedback();
     });
     watchlistPriceShowInput?.addEventListener("change", () => {
       const next = loadSettings();
       next.watchlistPriceShowEnabled = watchlistPriceShowInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       applyUiSettingsNow();
     });
     watchlistPriceDeleteInput?.addEventListener("change", () => {
       const next = loadSettings();
       next.watchlistPriceDeleteOnRemove = watchlistPriceDeleteInput.checked;
       saveSettings(next);
+      showSavedFeedback();
     });
     watchlistPriceReAddPromptInput?.addEventListener("change", () => {
       const next = loadSettings();
       next.watchlistPriceReAddPrompt = watchlistPriceReAddPromptInput.checked;
       saveSettings(next);
+      showSavedFeedback();
     });
     watchlistPriceReAddModeInput?.addEventListener("change", () => {
       const next = loadSettings();
       next.watchlistPriceReAddMode =
         watchlistPriceReAddModeInput.value === "overwrite" ? "overwrite" : "append";
       saveSettings(next);
+      showSavedFeedback();
     });
     lupeEnabledInput.addEventListener("change", () => {
       const next = loadSettings();
       next.lupeEnabled = lupeEnabledInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       applyUiSettingsNow();
     });
     searchWatchlistHeartEnabledInput?.addEventListener("change", () => {
       const next = loadSettings();
       next.searchWatchlistHeartEnabled = searchWatchlistHeartEnabledInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       applyUiSettingsNow();
     });
     hideTopAdsInput.addEventListener("change", () => {
       const next = loadSettings();
       next.hideTopAdsEnabled = hideTopAdsInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       applyHideTopAdsStyle();
     });
     imagePreloadEnabledInput?.addEventListener("change", () => {
       const next = loadSettings();
       next.imagePreloadEnabled = imagePreloadEnabledInput.checked;
       saveSettings(next);
+      showSavedFeedback();
       syncImagePreloadSubgroupUi();
       applyImagePreload();
     });
@@ -4077,6 +4254,7 @@
       const next = loadSettings();
       next.imagePreloadCount = normalizeImagePreloadCount(imagePreloadCountInput.value);
       saveSettings(next);
+      showSavedFeedback();
       imagePreloadCountInput.value = String(next.imagePreloadCount);
       applyImagePreload();
     });
@@ -4084,6 +4262,7 @@
       const next = loadSettings();
       next.preferredSort = selectInput.value;
       saveSettings(next);
+      showSavedFeedback();
       if (next.autoSortEnabled) applyPreferredSort();
     });
   }

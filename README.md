@@ -7,7 +7,7 @@ Userscript fuer `kleinanzeigen.de` mit einer kleinen Tools-Oberflaeche, automati
 - Tools-Button im Header
 - Einstellungs-Panel direkt auf der Seite
 - Automatische Standard-Sortierung
-- **Anzeige (`/s-anzeige/…`)**: Notizen (Speichern/Löschen, eigener Speicher `kaPlusNotesV1`), **Als PDF speichern** (direkter Download via eingebetteter [html2pdf.js](https://github.com/eKoopmans/html2pdf.js), `@require` im Script)
+- **Anzeige (`/s-anzeige/…`)**: Notizen (Speichern/Löschen, eigener Speicher `kaPlusNotesV1`), **Als PDF speichern** (direkter Download via eingebettetem [jsPDF](https://github.com/parallax/jsPDF), `@require` im Script) mit Lade-Animation und Fortschrittsanzeige (z. B. „Bilder werden geladen (3/12)“) während der Erstellung
 - **Bilder vorab laden**: Galeriebilder der Anzeige werden im Voraus geladen (statt erst beim Weiterklicken); Anzahl einstellbar (`0` = alle, zusätzlich ein Bild rückwärts)
 - **Suche**: gelbe Lupen-Schaltfläche auf Kartenbildern, Lightbox mit größtmöglicher Bild-URL
 - **Suche**: Herz-Schaltfläche auf Kartenbildern zum direkten Merken/Entfernen aus der Merkliste, ohne die Anzeige zu öffnen
