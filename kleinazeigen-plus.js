@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.84
+// @version      1.2.86
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Merken-Herz direkt in der Trefferliste, Galerie-Bilder vorab laden, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @icon         https://www.kleinanzeigen.de/favicon.ico
@@ -352,11 +352,15 @@
     });
   }
 
+  function isEmptySearchPage(pathname) {
+    return /^\/s-(sortierung:[^/]+\/)?suchen\.html$/.test(pathname);
+  }
+
   function buildSortedPath(pathname, sortName) {
     if (!pathname.startsWith("/s-")) return null;
     if (pathname.startsWith("/s-anzeige/")) return null;
 
-    if (isProfilePage(pathname)) {
+    if (isProfilePage(pathname) || isEmptySearchPage(pathname)) {
       if (/^\/s-sortierung:[^/]+\//.test(pathname)) {
         return pathname.replace(/^\/s-sortierung:[^/]+\//, "/s-");
       }
@@ -4137,11 +4141,29 @@
     }
     syncAdDetailExtrasSubgroupUi();
 
-    function closePanel() {
-      panel.classList.remove("open");
+    function updatePanelMaxHeight() {
+      const availableHeight = window.innerHeight - panel.getBoundingClientRect().top - 12;
+      panel.style.maxHeight = Math.max(80, availableHeight) + "px";
     }
 
-    openBtn.addEventListener("click", () => panel.classList.toggle("open"));
+    function openPanel() {
+      panel.classList.add("open");
+      updatePanelMaxHeight();
+      window.addEventListener("resize", updatePanelMaxHeight);
+      window.addEventListener("scroll", updatePanelMaxHeight, { passive: true });
+    }
+
+    function closePanel() {
+      panel.classList.remove("open");
+      panel.style.maxHeight = "";
+      window.removeEventListener("resize", updatePanelMaxHeight);
+      window.removeEventListener("scroll", updatePanelMaxHeight);
+    }
+
+    openBtn.addEventListener("click", () => {
+      if (panel.classList.contains("open")) closePanel();
+      else openPanel();
+    });
     document.addEventListener("click", (event) => {
       if (!root.contains(event.target)) closePanel();
     });
