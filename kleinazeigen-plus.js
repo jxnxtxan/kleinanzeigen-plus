@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.86
+// @version      1.2.87
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Merken-Herz direkt in der Trefferliste, Galerie-Bilder vorab laden, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @icon         https://www.kleinanzeigen.de/favicon.ico
@@ -595,8 +595,6 @@
     return "";
   }
 
-  const NON_NUMERIC_PRICE_RE =
-    /\b(vb|verhandlungsbasis|zu verschenken|tausch|diverses|preis\s*auf\s*anfrage)\b/i;
   const EURO_PRICE_PATTERN =
     /(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:€|eur)/gi;
   const WATCHLIST_NOTE_COLLAPSED_HEIGHT_PX = 72;
@@ -644,7 +642,8 @@
     const raw = String(text || "")
       .replace(/\s+/g, " ")
       .trim();
-    if (!raw || NON_NUMERIC_PRICE_RE.test(raw)) return null;
+    if (!raw) return null;
+    // Zahl vor Zusatz: „150 € VB“ ist ein gültiger Preis, nur „VB“/„Zu verschenken“ ohne Betrag nicht.
     const matches = [...raw.matchAll(EURO_PRICE_PATTERN)];
     if (!matches.length) return null;
     const m = matches[matches.length - 1];
@@ -3257,8 +3256,21 @@
       btn.dataset.kaPlusHeartBusy = "0";
       btn.style.opacity = "1";
       if (ok) {
-        if (wasOn) markAdKnownOffWatchlist(adId);
-        else markAdKnownOnWatchlist(adId);
+        const settings = loadSettings();
+        if (wasOn) {
+          markAdKnownOffWatchlist(adId);
+          if (settings.watchlistPriceDeleteOnRemove === true) {
+            clearPriceForAd(adId);
+            scheduleKaPlusRefresh();
+          }
+          return;
+        }
+        markAdKnownOnWatchlist(adId);
+        if (settings.watchlistPriceSaveEnabled === false) return;
+        const priceText = getPriceTextFromListingCard(btn.closest("article, li"));
+        saveWatchlistPriceForAd(adId, priceText).then((saved) => {
+          if (saved) scheduleKaPlusRefresh();
+        });
         return;
       }
       setHeartButtonState(btn, wasOn);
