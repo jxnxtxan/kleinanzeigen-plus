@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kleinanzeigen Plus
 // @namespace    https://local.kleinanzeigen.enhanced
-// @version      1.2.87
+// @version      1.2.88
 // @description  Sortierung, Notizen & PDF auf Anzeigen, Bild-Lupe in Suchergebnissen, Merken-Herz direkt in der Trefferliste, Galerie-Bilder vorab laden, TOP-Anzeigen ausblendbar, Tools-Panel.
 // @match        https://www.kleinanzeigen.de/*
 // @icon         https://www.kleinanzeigen.de/favicon.ico
@@ -674,7 +674,7 @@
   function buildPriceDeltaLabel(savedCents, currentCents) {
     if (typeof savedCents !== "number" || typeof currentCents !== "number") return null;
     const diff = currentCents - savedCents;
-    if (diff === 0) return { text: "unverändert", tone: "neutral" };
+    if (diff === 0) return null;
     const abs = formatEuroFromCents(Math.abs(diff));
     if (diff < 0) return { text: `−${abs}`, tone: "down" };
     return { text: `+${abs}`, tone: "up" };
@@ -2065,20 +2065,6 @@
           gap: 8px;
           margin-top: 8px;
         }
-        #ka-plus-ad-tools .ka-plus-btn-save {
-          flex: 1;
-          border: none;
-          border-radius: 999px;
-          padding: 8px 12px;
-          background: #ffc107;
-          color: #111;
-          font-weight: 600;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          text-align: center;
-        }
         #ka-plus-ad-tools .ka-plus-btn-del {
           flex: 1;
           border: none;
@@ -2185,7 +2171,6 @@
       <p class="ka-plus-notes-title">MEINE NOTIZEN</p>
       <textarea class="ka-plus-notes-input" id="ka-plus-notes-ta" aria-label="Eigene Notiz zur Anzeige"></textarea>
       <div class="ka-plus-notes-actions">
-        <button type="button" class="ka-plus-btn-save" id="ka-plus-notes-save">Speichern</button>
         <button type="button" class="ka-plus-btn-del" id="ka-plus-notes-del">Löschen</button>
       </div>
       `
@@ -2212,8 +2197,8 @@
     const ta = root.querySelector("#ka-plus-notes-ta");
     if (ta) {
       ta.value = saved;
-      root.querySelector("#ka-plus-notes-save")?.addEventListener("click", () => {
-        persistNoteForAd(adId, ta.value.trim());
+      ta.addEventListener("input", () => {
+        persistNoteForAd(adId, ta.value);
       });
       root.querySelector("#ka-plus-notes-del")?.addEventListener("click", () => {
         ta.value = "";
